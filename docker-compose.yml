@@ -1,0 +1,330 @@
+name: ${COMPOSE_PROJECT_NAME:-nexora}
+
+x-security: &default-security
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    user: "${POSTGRES_UID:-70}:${POSTGRES_GID:-70}"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nexora}
+      POSTGRES_USER: ${POSTGRES_OWNER_USER:-nexora_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD:?Run scripts/init-droplet.sh first}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+      PGDATA: /var/lib/postgresql/data/pgdata
+      APP_DB_USER: ${APP_DB_USER:-nexora_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run scripts/init-droplet.sh first}
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_DIR:?Run scripts/init-droplet.sh first}
+        target: /var/lib/postgresql/data
+      - ./deploy/postgres/10-app-user.sh:/docker-entrypoint-initdb.d/10-app-user.sh:ro
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:uid=${POSTGRES_UID:-70},gid=${POSTGRES_GID:-70},mode=0700
+      - /var/run/postgresql:uid=${POSTGRES_UID:-70},gid=${POSTGRES_GID:-70},mode=0750
+    stop_grace_period: 60s
+    <<: *default-security
+    logging: *default-logging
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    user: "${APP_UID:?Run scripts/init-droplet.sh first}:${APP_GID:?Run scripts/init-droplet.sh first}"
+    environment:
+      ENVIRONMENT: production
+      PUBLIC_BASE_URL: https://${DOMAIN:?Set DOMAIN in .env}
+      ALLOWED_ORIGINS: https://${DOMAIN}
+      DATABASE_URL: ${DATABASE_URL:?Run scripts/init-droplet.sh first}
+      FILE_STORAGE_ROOT: /var/lib/nexora/files
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-__Host-nexora_session}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-24}
+      SESSION_COOKIE_SECURE: "true"
+      ALLOW_PUBLIC_TENANT_REGISTRATION: ${ALLOW_PUBLIC_TENANT_REGISTRATION:-false}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?Run scripts/init-droplet.sh first}
+      CREDENTIAL_KEY_VERSION: ${CREDENTIAL_KEY_VERSION:-1}
+      PHONE_HASH_KEY: ${PHONE_HASH_KEY:?Run scripts/init-droplet.sh first}
+      LICENSE_SIGNING_PRIVATE_KEY: ${LICENSE_SIGNING_PRIVATE_KEY:?Run scripts/init-droplet.sh first}
+      LICENSE_SIGNING_PUBLIC_KEY: ${LICENSE_SIGNING_PUBLIC_KEY:?Run scripts/init-droplet.sh first}
+      CALL_WORKER_TOKEN: ${CALL_WORKER_TOKEN:?Run scripts/init-droplet.sh first}
+      WORKER_CONFIG_KEY: ${WORKER_CONFIG_KEY:?Run scripts/init-droplet.sh first}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      LIVEKIT_INTERNAL_URL: ws://livekit:7880
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:?Run scripts/init-droplet.sh first}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?Run scripts/init-droplet.sh first}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?Run scripts/init-droplet.sh first}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      TWILIO_CREDENTIALS_JSON: ${TWILIO_CREDENTIALS_JSON:-}
+      VONAGE_CREDENTIALS_JSON: ${VONAGE_CREDENTIALS_JSON:-}
+      VOBIZ_CREDENTIALS_JSON: ${VOBIZ_CREDENTIALS_JSON:-}
+      CONVOX_CREDENTIALS_JSON: ${CONVOX_CREDENTIALS_JSON:-}
+      TELNYX_CREDENTIALS_JSON: ${TELNYX_CREDENTIALS_JSON:-}
+      CLOUDONIX_CREDENTIALS_JSON: ${CLOUDONIX_CREDENTIALS_JSON:-}
+      ASTERISK_CREDENTIALS_JSON: ${ASTERISK_CREDENTIALS_JSON:-}
+      HOME: /tmp
+    volumes:
+      - type: bind
+        source: ${FILES_DIR:?Run scripts/init-droplet.sh first}
+        target: /var/lib/nexora/files
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - frontend
+      - data
+      - worker
+    expose:
+      - "8000"
+    read_only: true
+    tmpfs:
+      - /tmp:uid=${APP_UID},gid=${APP_GID},mode=0700
+    pids_limit: 512
+    init: true
+    <<: *default-security
+    logging: *default-logging
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_ORIGIN: https://${DOMAIN}
+      FASTAPI_INTERNAL_URL: http://api:8000
+      API_INTERNAL_URL: http://api:8000
+      HOME: /tmp
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - frontend
+    expose:
+      - "3000"
+    read_only: true
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=0700
+    pids_limit: 512
+    init: true
+    <<: *default-security
+    logging: *default-logging
+
+  redis:
+    build:
+      context: .
+      dockerfile: deploy/redis.Dockerfile
+    restart: unless-stopped
+    user: "999:999"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Run scripts/init-droplet.sh first}
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:uid=999,gid=999,mode=0700
+    pids_limit: 128
+    <<: *default-security
+    logging: *default-logging
+
+  livekit:
+    image: ${LIVEKIT_SERVER_IMAGE:-livekit/livekit-server:v1.13.6}
+    restart: unless-stopped
+    user: "10003:10003"
+    environment:
+      HOME: /tmp
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses:
+          - "0.0.0.0"
+        log_level: info
+        rtc:
+          tcp_port: 7881
+          port_range_start: ${LIVEKIT_RTC_PORT_START:-50000}
+          port_range_end: ${LIVEKIT_RTC_PORT_END:-50100}
+          use_external_ip: true
+        redis:
+          address: redis:6379
+          password: "${REDIS_PASSWORD}"
+        keys:
+          "${LIVEKIT_API_KEY}": "${LIVEKIT_API_SECRET}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - frontend
+      - data
+      - worker
+    expose:
+      - "7880"
+    ports:
+      - "7881:7881/tcp"
+      - "${LIVEKIT_RTC_PORT_START:-50000}-${LIVEKIT_RTC_PORT_END:-50100}:${LIVEKIT_RTC_PORT_START:-50000}-${LIVEKIT_RTC_PORT_END:-50100}/udp"
+    healthcheck:
+      test: ["CMD", "/livekit-server", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:uid=10003,gid=10003,mode=0700
+    pids_limit: 512
+    <<: *default-security
+    logging: *default-logging
+
+  voice-agent:
+    build:
+      context: .
+      dockerfile: deploy/voice.Dockerfile
+    restart: unless-stopped
+    environment:
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      APP_URL: http://api:8000
+      CALL_WORKER_TOKEN: ${CALL_WORKER_TOKEN}
+      WORKER_CONFIG_KEY: ${WORKER_CONFIG_KEY}
+      ALLOW_PRIVATE_APP_URL: "true"
+      PRIVATE_APP_ORIGINS: http://api:8000
+      REQUIRE_PROVIDER_ENVELOPE: "true"
+      COMPLETION_SPOOL_DIR: /var/lib/nexora/voice-spool
+      PLATFORM_MAX_CALL_SECONDS: ${PLATFORM_MAX_CALL_SECONDS:-3600}
+      HOME: /tmp
+    depends_on:
+      api:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+        required: false
+    networks:
+      - worker
+    volumes:
+      - type: bind
+        source: ${VOICE_SPOOL_DIR:?Run scripts/init-droplet.sh first}
+        target: /var/lib/nexora/voice-spool
+    read_only: true
+    tmpfs:
+      - /tmp:uid=10002,gid=10002,mode=0700
+    pids_limit: 512
+    init: true
+    stop_grace_period: 45s
+    <<: *default-security
+    logging: *default-logging
+
+  dispatcher:
+    profiles:
+      - campaigns
+    build:
+      context: .
+      dockerfile: deploy/voice.Dockerfile
+    restart: unless-stopped
+    command: ["dispatcher.py"]
+    environment:
+      APP_URL: http://api:8000
+      ALLOW_PRIVATE_APP_URL: "true"
+      PRIVATE_APP_ORIGINS: http://api:8000
+      WORKSPACE_API_KEY: ${WORKSPACE_API_KEY:-}
+      DISPATCH_POLL_SECONDS: ${DISPATCH_POLL_SECONDS:-1}
+      HOME: /tmp
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - worker
+    healthcheck:
+      disable: true
+    read_only: true
+    tmpfs:
+      - /tmp:uid=10002,gid=10002,mode=0700
+    pids_limit: 256
+    init: true
+    <<: *default-security
+    logging: *default-logging
+
+  nginx:
+    build:
+      context: .
+      dockerfile: deploy/nginx/Dockerfile
+    restart: unless-stopped
+    user: "${APP_UID}:${APP_GID}"
+    environment:
+      DOMAIN: ${DOMAIN}
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL}
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-26m}
+      NGINX_ENVSUBST_FILTER: DOMAIN|LIVEKIT_DOMAIN|LIVEKIT_PUBLIC_URL|MAX_UPLOAD_SIZE
+    volumes:
+      - ./deploy/tls:/etc/nginx/tls
+      - ./deploy/acme:/var/www/certbot:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+        required: false
+    networks:
+      - frontend
+    ports:
+      - "80:8080/tcp"
+      - "443:8443/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 --no-check-certificate -O /dev/null https://127.0.0.1:8443/nginx-health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d:uid=${APP_UID},gid=${APP_GID},mode=0750
+      - /var/cache/nginx:uid=${APP_UID},gid=${APP_GID},mode=0750
+      - /var/run:uid=${APP_UID},gid=${APP_GID},mode=0750
+      - /tmp:uid=${APP_UID},gid=${APP_GID},mode=0700
+    pids_limit: 256
+    <<: *default-security
+    logging: *default-logging
+
+networks:
+  frontend:
+    driver: bridge
+  worker:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true

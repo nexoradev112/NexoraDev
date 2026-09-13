@@ -1,0 +1,108 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing / coverage
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+.nyc_output/
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# debug / logs / caches
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+.eslintcache
+*.tsbuildinfo
+
+# env files and local secrets (commit examples only)
+.env
+.env.*
+.dev.vars
+!.env.example
+!.env.droplet.example
+
+# local non-Docker data
+.data/
+data/
+backups/
+
+# local caches and generated runtimes
+.vercel
+.wrangler/
+.sites-runtime/
+.openai/
+.cache/
+
+# build outputs
+dist/
+build/
+outputs/
+work/
+
+# credentials, certs, dumps
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+*.dump
+*.orig
+
+# local release archives (do not push packaged zips)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# python
+**/.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# editors
+.idea/
+*.swp
+*.swo
+*~
+
+backend/.venv/

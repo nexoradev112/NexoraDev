@@ -1,0 +1,20 @@
+[Unit]
+Description=Nexora single-droplet Docker Compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/nexora/docker-compose.yml
+ConditionPathExists=/opt/nexora/.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/nexora
+ExecStart=/usr/bin/docker compose up -d --build --remove-orphans
+ExecReload=/usr/bin/docker compose up -d --build --remove-orphans
+ExecStop=/usr/bin/docker compose stop
+TimeoutStartSec=0
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

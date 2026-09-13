@@ -1,0 +1,80 @@
+# Native-systemd alternative. Docker Compose already runs nginx for you.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+log_format query_free escape=json
+    '{"time":"$time_iso8601","remote":"$remote_addr",'
+    '"method":"$request_method","uri":"$uri","protocol":"$server_protocol",'
+    '"status":$status,"bytes":$body_bytes_sent,"request_time":$request_time,'
+    '"request_id":"$request_id"}';
+access_log /var/log/nginx/access.log query_free;
+
+limit_req_zone $binary_remote_addr zone=nexora_auth:10m rate=5r/m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name app.example.com;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 308 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name app.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/app.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/app.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 26m;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' wss://voice.example.com" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(self), microphone=(self), geolocation=()" always;
+
+    location ^~ /api/internal/ { return 404; }
+
+    location = /api/auth/login {
+        limit_req zone=nexora_auth burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-User-Email "";
+        proxy_set_header X-Auth-Request-Email "";
+        proxy_set_header X-ChatGPT-User-Id "";
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-User-Email "";
+        proxy_set_header X-Auth-Request-Email "";
+        proxy_set_header X-ChatGPT-User-Id "";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}

@@ -1,0 +1,28 @@
+services:
+  redis:
+    profiles:
+      - selfhost-disabled
+
+  livekit:
+    profiles:
+      - selfhost-disabled
+
+  api:
+    environment:
+      LIVEKIT_INTERNAL_URL: ${LIVEKIT_CLOUD_URL}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_CLOUD_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_CLOUD_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_CLOUD_API_SECRET}
+
+  voice-agent:
+    environment:
+      LIVEKIT_URL: ${LIVEKIT_CLOUD_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_CLOUD_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_CLOUD_API_SECRET}
+
+  nginx:
+    build:
+      args:
+        NGINX_TEMPLATE: deploy/nginx/cloud.conf.template
+    environment:
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_CLOUD_URL}

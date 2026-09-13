@@ -1,0 +1,10 @@
+[project]
+name = "nexora-livekit-agent"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=46.0",
+  "anthropic>=0.41,<1",
+  "livekit-agents[anthropic,deepgram,elevenlabs,openai,silero]>=1.7.1,<1.8",
+  "python-dotenv>=1.0",
+]

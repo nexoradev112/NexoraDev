@@ -24,6 +24,7 @@ from livekit.agents import (
     RunContext,
     TurnHandlingOptions,
     function_tool,
+    inference,
 )
 from livekit.agents.utils.audio import audio_frames_from_file
 
@@ -370,6 +371,8 @@ def platform_llm_token_budget(config: Mapping[str, object]) -> int | None:
     )
     if source != "platform":
         return None
+    if isinstance(llm_config, Mapping) and llm_config.get("inference"):
+        return None
     runtime_policy = config.get("runtimePolicy")
     raw_budget = runtime_policy.get("approvedTokens") if isinstance(runtime_policy, Mapping) else None
     if isinstance(raw_budget, bool) or not isinstance(raw_budget, int) or raw_budget <= 0:
@@ -709,12 +712,13 @@ async def agent_session(ctx: agents.JobContext):
             try:
                 await report_call_completion(ctx.room.name, session, started_at, session_state, policy)
             finally:
-                # Disconnect the browser/SIP participant too. Closing only the
-                # agent job can otherwise leave a billable remote leg alive.
-                try:
-                    await asyncio.wait_for(ctx.delete_room(), timeout=5)
-                except Exception:  # noqa: BLE001,S110
-                    pass
+                # Match AICMS v6/v7: never force-delete browser test rooms from the
+                # worker. Only tear down billable call rooms after completion.
+                if ctx.room.name.startswith("call-"):
+                    try:
+                        await asyncio.wait_for(ctx.delete_room(), timeout=5)
+                    except Exception:  # noqa: BLE001,S110
+                        pass
 
     try:
         config = await load_agent_config(ctx.room.name)
@@ -739,17 +743,36 @@ async def agent_session(ctx: agents.JobContext):
         )
         session_state["approved_tokens"] = approved_tokens or 0
         session_state["max_turn_output_tokens"] = max_turn_output_tokens or 0
-        provider_stack = build_provider_stack(
-            config,
-            max_completion_tokens=max_turn_output_tokens,
+        runtime = config.get("runtimeProviders")
+        transport = (
+            str(runtime.get("transport") or "direct").strip().lower()
+            if isinstance(runtime, Mapping)
+            else "direct"
         )
-        session = AgentSession(
-            stt=provider_stack.stt,
-            vad=provider_stack.vad,
-            llm=provider_stack.llm,
-            tts=provider_stack.tts,
-            turn_handling=TurnHandlingOptions(turn_detection=provider_stack.turn_detection),
-        )
+        if transport == "livekit_inference":
+            # Same stack as AICMS v6/v7: LiveKit Inference owns STT/LLM/TTS/turn
+            # detection. Do not mix tenant plugin providers into this path.
+            _ = build_provider_stack(config, max_completion_tokens=max_turn_output_tokens)
+            session = AgentSession(
+                stt=inference.STT(model="elevenlabs/scribe_v2_realtime"),
+                llm=inference.LLM(model="openai/gpt-4.1-mini"),
+                tts=inference.TTS(model="elevenlabs/eleven_flash_v2_5", voice="Rachel"),
+                turn_handling=TurnHandlingOptions(turn_detection=inference.TurnDetector()),
+            )
+        else:
+            provider_stack = build_provider_stack(
+                config,
+                max_completion_tokens=max_turn_output_tokens,
+            )
+            session_options: dict[str, object] = {
+                "stt": provider_stack.stt,
+                "llm": provider_stack.llm,
+                "tts": provider_stack.tts,
+                "turn_handling": TurnHandlingOptions(turn_detection=provider_stack.turn_detection),
+            }
+            if provider_stack.vad is not None:
+                session_options["vad"] = provider_stack.vad
+            session = AgentSession(**session_options)
 
         @session.on("error")
         def on_error(_event) -> None:

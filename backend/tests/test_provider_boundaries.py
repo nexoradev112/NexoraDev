@@ -116,18 +116,18 @@ def test_generic_public_config_is_capability_scoped_and_legacy_values_are_filter
         )
         assert response.status_code == 422, response.text
 
-    saved = tenant.post(
+    groq = tenant.post(
         "/api/providers",
         headers=headers,
         json={
             "kind": "llm",
-            "provider": "openai",
-            "secret": "tenant-openai-key",
-            "config": {"model": "gpt-4.1-mini"},
+            "provider": "groq",
+            "secret": "tenant-groq-key",
+            "config": {"model": "openai/gpt-oss-120b"},
         },
     )
-    assert saved.status_code == 201, saved.text
-    assert saved.json()["connection"]["config"] == {"model": "gpt-4.1-mini"}
+    assert groq.status_code == 201, groq.text
+    assert groq.json()["connection"]["config"] == {"model": "openai/gpt-oss-120b"}
 
     # Defense in depth for a database imported from the earlier implementation:
     # public serializers must not echo formerly accepted unsafe fields.

@@ -16,10 +16,11 @@ from .licensing import (
     active_license_for_workspace,
     adjust_consumed_quota,
     consume_quota,
+    provider_source,
     require_feature,
 )
-from .models import UsageEvent, Workspace
-from .provider_vault import RuntimeCredential, enforce_platform_model, resolve_runtime_credential
+from .models import ProviderConnection, UsageEvent, Workspace
+from .provider_vault import RuntimeCredential, enforce_platform_model, resolve_groq_model, resolve_runtime_credential
 
 FIXED_LLM_ENDPOINTS = {
     "openai": "https://api.openai.com/v1/chat/completions",
@@ -41,6 +42,30 @@ class ProviderResponseError(Exception):
     def __init__(self, message: str, *, cost_uncertain: bool) -> None:
         super().__init__(message)
         self.cost_uncertain = cost_uncertain
+
+
+def expand_llm_provider_order(
+    db: Session,
+    claims: LicenseClaims,
+    provider_order: list[str],
+) -> list[str]:
+    ordered: list[str] = []
+    for provider in provider_order:
+        if provider in FIXED_LLM_ENDPOINTS and provider not in ordered:
+            ordered.append(provider)
+    if provider_source(claims, "llm") != "byok":
+        return ordered
+    extras = db.scalars(
+        select(ProviderConnection.provider).where(
+            ProviderConnection.workspace_id == claims.license.workspace_id,
+            ProviderConnection.kind == "llm",
+            ProviderConnection.status == "active",
+        )
+    )
+    for provider in extras:
+        if provider in FIXED_LLM_ENDPOINTS and provider not in ordered:
+            ordered.append(provider)
+    return ordered
 
 
 def _openai_compatible(
@@ -137,7 +162,7 @@ def create_chat_completion(
     last_configuration_error: HTTPException | None = None
     attempted = False
     model_was_rejected = False
-    for provider in provider_order:
+    for provider in expand_llm_provider_order(db, claims, provider_order):
         if provider not in FIXED_LLM_ENDPOINTS:
             continue
         # Every attempt gets a fresh entitlement after locking the tenant.
@@ -163,8 +188,8 @@ def create_chat_completion(
         provider_model = model
         if provider == "anthropic" and not model.startswith("claude-"):
             provider_model = credential.config.get("model", "claude-3-5-haiku-latest")
-        elif provider == "groq" and not model.startswith(("llama", "mixtral", "gemma")):
-            provider_model = credential.config.get("model", "llama-3.3-70b-versatile")
+        elif provider == "groq":
+            provider_model = resolve_groq_model(model, credential.config.get("model", ""))
         provider_model = enforce_platform_model("llm", provider, provider_model, credential.source)
         if allowed_models is not None and provider_model not in allowed_models.get(provider, ()):
             model_was_rejected = True
@@ -243,12 +268,12 @@ def create_chat_completion(
         )
         db.commit()
         return result
-    if last_configuration_error:
-        raise last_configuration_error
-    if model_was_rejected and not attempted:
-        raise HTTPException(status_code=422, detail="No allowlisted LLM model was available")
     if attempted:
         raise HTTPException(status_code=502, detail="Configured LLM providers did not complete the request")
+    if last_configuration_error:
+        raise last_configuration_error
+    if model_was_rejected:
+        raise HTTPException(status_code=422, detail="No allowlisted LLM model was available")
     raise HTTPException(status_code=502, detail="No configured LLM provider was available")
 
 

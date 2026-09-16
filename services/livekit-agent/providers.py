@@ -19,6 +19,17 @@ from dataclasses import dataclass
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+try:
+    from livekit.plugins import silero as _SILERO_PLUGIN
+except ImportError:  # pragma: no cover - missing extra is a setup error
+    _SILERO_PLUGIN = None
+
+for _plugin_name in ("openai", "elevenlabs", "deepgram", "anthropic"):
+    try:
+        __import__(f"livekit.plugins.{_plugin_name}")
+    except ImportError:
+        pass
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$")
 _ENVELOPE_AAD_PREFIX = b"nexora-runtime-providers:v1:"
@@ -50,13 +61,19 @@ def build_provider_stack(
         raise ProviderConfigurationError("Tenant runtime providers are not configured")
 
     transport = str(runtime.get("transport") or "direct").strip().lower()
-    if transport != "direct":
+    if transport not in {"direct", "livekit_inference"}:
         raise ProviderConfigurationError("Unsupported voice provider transport")
     _validate_runtime_policy(runtime)
     if max_completion_tokens is not None and (
         isinstance(max_completion_tokens, bool) or not 1 <= max_completion_tokens <= 1_024
     ):
         raise ProviderConfigurationError("LLM output token limit is invalid")
+    if transport == "livekit_inference":
+        return _inference_stack(
+            runtime,
+            str(config.get("locale") or "auto"),
+            max_completion_tokens=max_completion_tokens,
+        )
     llm_source = str(_provider_config(runtime, "llm").get("credentialSource") or "").strip().lower()
     if llm_source == "platform" and max_completion_tokens is None:
         raise ProviderConfigurationError("Platform LLM token budget is unavailable")
@@ -67,15 +84,28 @@ def build_provider_stack(
     )
 
 
+def _uses_inference(config: Mapping[str, object]) -> bool:
+    return bool(config.get("inference")) and not str(config.get("apiKey") or "").strip()
+
+
 def _validate_runtime_policy(runtime: Mapping[str, object]) -> None:
     """Verify that each decrypted capability carries an explicit licensed source."""
 
     mode = str(runtime.get("mode") or "").strip().lower()
     if mode not in {"byok", "platform", "hybrid"}:
         raise ProviderConfigurationError("Provider mode is missing or invalid")
+    transport = str(runtime.get("transport") or "direct").strip().lower()
     hybrid = runtime.get("hybridPolicy")
     for kind in ("llm", "stt", "tts"):
         config = _provider_config(runtime, kind)
+        if _uses_inference(config):
+            if transport != "livekit_inference":
+                raise ProviderConfigurationError("LiveKit Inference is not enabled for this session")
+            if str(config.get("credentialSource") or "").strip().lower() != "platform":
+                raise ProviderConfigurationError(f"Licensed credential source mismatch for {kind}")
+            continue
+        if transport == "livekit_inference":
+            raise ProviderConfigurationError("LiveKit Inference session is incomplete")
         source = str(config.get("credentialSource") or "").strip().lower()
         expected = mode
         if mode == "hybrid":
@@ -140,17 +170,34 @@ def decrypt_runtime_providers_envelope(
     return runtime
 
 
-def _direct_stack(
+def _inference_stack(
     runtime: Mapping[str, object],
     locale: str,
     *,
     max_completion_tokens: int | None,
 ) -> ProviderStack:
-    from livekit.plugins import elevenlabs, openai
+    del locale, max_completion_tokens
+    from livekit.agents import inference
 
     stt_config = _provider_config(runtime, "stt")
     llm_config = _provider_config(runtime, "llm")
     tts_config = _provider_config(runtime, "tts")
+    if not (_uses_inference(stt_config) and _uses_inference(llm_config) and _uses_inference(tts_config)):
+        raise ProviderConfigurationError("LiveKit Inference session is incomplete")
+    return ProviderStack(
+        stt=inference.STT(model=_model(stt_config, "model", "elevenlabs/scribe_v2_realtime")),
+        llm=inference.LLM(model=_model(llm_config, "model", "openai/gpt-4.1-mini")),
+        tts=inference.TTS(
+            model=_model(tts_config, "model", "elevenlabs/eleven_flash_v2_5"),
+            voice=_model(tts_config, "voice", "Rachel"),
+        ),
+        vad=None,
+        turn_detection=inference.TurnDetector(),
+    )
+
+
+def _build_direct_llm(llm_config: Mapping[str, object], *, max_completion_tokens: int | None) -> object:
+    from livekit.plugins import openai
 
     llm_provider = _provider_name(llm_config)
     llm_key = _required_key(llm_config, "LLM")
@@ -159,7 +206,7 @@ def _direct_stack(
         "model",
         {
             "openai": "gpt-4.1-mini",
-            "groq": "llama-3.3-70b-versatile",
+            "groq": "openai/gpt-oss-120b",
             "anthropic": "claude-sonnet-4-6",
         }.get(llm_provider, ""),
     )
@@ -172,8 +219,8 @@ def _direct_stack(
         }
         if max_completion_tokens is not None:
             llm_options["max_completion_tokens"] = max_completion_tokens
-        llm = openai.LLM(**llm_options)
-    elif llm_provider == "groq":
+        return openai.LLM(**llm_options)
+    if llm_provider == "groq":
         llm_options = {
             "model": llm_model,
             "api_key": llm_key,
@@ -182,8 +229,8 @@ def _direct_stack(
         }
         if max_completion_tokens is not None:
             llm_options["max_completion_tokens"] = max_completion_tokens
-        llm = openai.LLM(**llm_options)
-    elif llm_provider == "anthropic":
+        return openai.LLM(**llm_options)
+    if llm_provider == "anthropic":
         try:
             from livekit.plugins import anthropic
         except ImportError as error:
@@ -191,9 +238,12 @@ def _direct_stack(
         anthropic_options: dict[str, object] = {"model": llm_model, "api_key": llm_key}
         if max_completion_tokens is not None:
             anthropic_options["max_tokens"] = max_completion_tokens
-        llm = anthropic.LLM(**anthropic_options)
-    else:
-        raise ProviderConfigurationError("Unsupported LLM provider")
+        return anthropic.LLM(**anthropic_options)
+    raise ProviderConfigurationError("Unsupported LLM provider")
+
+
+def _build_direct_stt(stt_config: Mapping[str, object], locale: str) -> object:
+    from livekit.plugins import elevenlabs, openai
 
     stt_provider = _provider_name(stt_config)
     stt_key = _required_key(stt_config, "STT")
@@ -206,58 +256,71 @@ def _direct_stack(
         }
         if language:
             options["language_code"] = language
-        stt = elevenlabs.STT(**options)
-    elif stt_provider == "openai":
-        stt = openai.STT(
+        return elevenlabs.STT(**options)
+    if stt_provider == "openai":
+        return openai.STT(
             model=_model(stt_config, "model", "gpt-4o-mini-transcribe"),
             api_key=stt_key,
             language=language or "en",
             detect_language=not bool(language),
         )
-    elif stt_provider == "deepgram":
+    if stt_provider == "deepgram":
         try:
             from livekit.plugins import deepgram
         except ImportError as error:
             raise ProviderConfigurationError("Deepgram voice plugin is not installed") from error
-        stt = deepgram.STT(
+        return deepgram.STT(
             model=_model(stt_config, "model", "nova-3"),
             api_key=stt_key,
             language=language or "multi",
             mip_opt_out=True,
         )
-    else:
-        raise ProviderConfigurationError("Unsupported STT provider")
+    raise ProviderConfigurationError("Unsupported STT provider")
+
+
+def _build_direct_tts(tts_config: Mapping[str, object]) -> object:
+    from livekit.plugins import elevenlabs, openai
 
     tts_provider = _provider_name(tts_config)
     tts_key = _required_key(tts_config, "TTS")
     if tts_provider == "elevenlabs":
-        tts = elevenlabs.TTS(
+        return elevenlabs.TTS(
             model=_model(tts_config, "model", "eleven_flash_v2_5"),
             voice_id=_model(tts_config, "voice", "21m00Tcm4TlvDq8ikWAM"),
             api_key=tts_key,
             apply_language_text_normalization=True,
             enable_logging=False,
         )
-    elif tts_provider == "openai":
-        tts = openai.TTS(
+    if tts_provider == "openai":
+        return openai.TTS(
             model=_model(tts_config, "model", "gpt-4o-mini-tts"),
             voice=_model(tts_config, "voice", "ash"),
             api_key=tts_key,
         )
-    else:
-        raise ProviderConfigurationError("Unsupported TTS provider")
+    raise ProviderConfigurationError("Unsupported TTS provider")
 
-    return ProviderStack(stt=stt, llm=llm, tts=tts, vad=_local_vad(), turn_detection="vad")
+
+def _direct_stack(
+    runtime: Mapping[str, object],
+    locale: str,
+    *,
+    max_completion_tokens: int | None,
+) -> ProviderStack:
+    return ProviderStack(
+        stt=_build_direct_stt(_provider_config(runtime, "stt"), locale),
+        llm=_build_direct_llm(_provider_config(runtime, "llm"), max_completion_tokens=max_completion_tokens),
+        tts=_build_direct_tts(_provider_config(runtime, "tts")),
+        vad=_local_vad(),
+        turn_detection="vad",
+    )
 
 
 def _local_vad() -> object:
     global _LOCAL_VAD
+    if _SILERO_PLUGIN is None:
+        raise ProviderConfigurationError("Local Silero VAD plugin is not installed")
     if _LOCAL_VAD is None:
-        try:
-            from livekit.plugins import silero
-        except ImportError as error:
-            raise ProviderConfigurationError("Local Silero VAD plugin is not installed") from error
-        _LOCAL_VAD = silero.VAD.load()
+        _LOCAL_VAD = _SILERO_PLUGIN.VAD.load()
     return _LOCAL_VAD
 
 

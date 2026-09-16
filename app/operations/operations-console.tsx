@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { formatDisplayDate, formatDisplayDateTime } from "../../lib/format-date";
 
 type Workspace = {
   id: number;
@@ -811,7 +812,7 @@ export default function OperationsConsole(props: OperationsConsoleProps) {
                         {row.evidenceRef}
                         <small>
                           {titleCase(row.channel || "voice")} · {row.legalBasis} ·{" "}
-                          {new Date(row.capturedAt).toLocaleString()}
+                          {formatDisplayDateTime(row.capturedAt)}
                         </small>
                       </b>
                       <em>{row.status}</em>
@@ -982,7 +983,7 @@ export default function OperationsConsole(props: OperationsConsoleProps) {
               <div className="audit-stream">
                 {props.audit.map((row) => (
                   <p key={row.id}>
-                    <time>{new Date(row.createdAt).toLocaleString()}</time>
+                    <time>{formatDisplayDateTime(row.createdAt)}</time>
                     <b>{row.action}</b>
                     <span>
                       {row.resourceType} {row.resourceId}
@@ -1038,7 +1039,7 @@ export default function OperationsConsole(props: OperationsConsoleProps) {
               <p className="secure-note">
                 <b>{props.workspace.plan}</b> · licensed access
                 {props.subscription?.currentPeriodEnd
-                  ? ` · recorded period ends ${new Date(props.subscription.currentPeriodEnd).toLocaleDateString()}`
+                  ? ` · recorded period ends ${formatDisplayDate(props.subscription.currentPeriodEnd)}`
                   : ""}
               </p>
               <button className="mini-action" type="button" disabled>

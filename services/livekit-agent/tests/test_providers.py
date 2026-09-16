@@ -8,12 +8,16 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from providers import (
     ProviderConfigurationError,
+    _SILERO_PLUGIN,
     build_provider_stack,
     decrypt_runtime_providers_envelope,
 )
 
 
 class ProviderResolutionTests(unittest.TestCase):
+    def test_silero_plugin_is_registered_when_providers_is_imported(self) -> None:
+        self.assertIsNotNone(_SILERO_PLUGIN)
+
     def test_missing_resolved_key_never_falls_back_to_process_environment(self) -> None:
         runtime = {
             "runtimeProviders": {
@@ -28,20 +32,63 @@ class ProviderResolutionTests(unittest.TestCase):
             os.environ,
             {"OPENAI_API_KEY": "platform-openai-secret", "ELEVEN_API_KEY": "platform-eleven-secret"},
             clear=False,
-        ), self.assertRaisesRegex(ProviderConfigurationError, "Resolved LLM credential is unavailable"):
+        ), self.assertRaisesRegex(ProviderConfigurationError, "Resolved (LLM|STT|TTS) credential is unavailable"):
             build_provider_stack(runtime)
 
-    def test_livekit_inference_is_not_available_in_self_hosted_direct_build(self) -> None:
+    def test_livekit_inference_uses_envelope_not_process_environment(self) -> None:
         runtime = {
             "runtimeProviders": {
                 "transport": "livekit_inference",
-                "stt": {"descriptor": "elevenlabs/scribe_v2_realtime"},
-                "llm": {"descriptor": "openai/gpt-4.1-mini"},
-                "tts": {"descriptor": "elevenlabs/eleven_flash_v2_5"},
+                "mode": "hybrid",
+                "hybridPolicy": {
+                    "llm": "byok",
+                    "stt": "byok",
+                    "tts": "byok",
+                    "realtime": "platform",
+                },
+                "llm": {
+                    "provider": "livekit",
+                    "model": "openai/gpt-4.1-mini",
+                    "credentialSource": "platform",
+                    "inference": True,
+                },
+                "stt": {
+                    "provider": "livekit",
+                    "model": "elevenlabs/scribe_v2_realtime",
+                    "credentialSource": "platform",
+                    "inference": True,
+                },
+                "tts": {
+                    "provider": "livekit",
+                    "model": "elevenlabs/eleven_flash_v2_5",
+                    "voice": "Rachel",
+                    "credentialSource": "platform",
+                    "inference": True,
+                },
             }
         }
-        with self.assertRaisesRegex(ProviderConfigurationError, "Unsupported"):
-            build_provider_stack(runtime)
+        with mock.patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "platform-openai-secret", "ELEVEN_API_KEY": "platform-eleven-secret"},
+            clear=False,
+        ), mock.patch("providers._local_vad", return_value="local-vad") as vad, mock.patch(
+            "livekit.agents.inference.LLM", return_value="inference-llm"
+        ) as llm, mock.patch(
+            "livekit.agents.inference.STT", return_value="inference-stt"
+        ) as stt, mock.patch(
+            "livekit.agents.inference.TTS", return_value="inference-tts"
+        ) as tts, mock.patch(
+            "livekit.agents.inference.TurnDetector", return_value="inference-turn"
+        ):
+            stack = build_provider_stack(runtime)
+        self.assertEqual((stack.llm, stack.stt, stack.tts), ("inference-llm", "inference-stt", "inference-tts"))
+        self.assertIsNone(stack.vad)
+        self.assertEqual(stack.turn_detection, "inference-turn")
+        vad.assert_not_called()
+        self.assertIn("openai/gpt-4.1-mini", str(llm.call_args))
+        self.assertNotIn("platform-openai-secret", str(stt.call_args))
+        self.assertNotIn("platform-eleven-secret", str(tts.call_args))
+        self.assertNotIn("api_key", str(llm.call_args))
 
     def test_unknown_transport_fails_closed(self) -> None:
         with self.assertRaisesRegex(ProviderConfigurationError, "Unsupported"):

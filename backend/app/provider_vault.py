@@ -31,11 +31,26 @@ SUPPORTED_PROVIDERS: dict[str, set[str]] = {
 
 # Server-funded models are deliberately bounded so a tenant cannot select an
 # unexpectedly expensive model in a saved graph and charge the platform account.
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
+GROQ_RETIRED_MODELS = {
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+}
+GROQ_CURRENT_MODELS = frozenset(
+    {
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b",
+        *GROQ_RETIRED_MODELS.values(),
+    }
+)
+GROQ_NATIVE_PREFIXES = ("llama", "mixtral", "gemma", "openai/", "qwen/", "meta-llama/")
+
 PLATFORM_MODEL_ALLOWLIST: dict[str, dict[str, frozenset[str]]] = {
     "llm": {
         "openai": frozenset({"gpt-4.1-mini", "gpt-4o-mini", "gpt-5-mini"}),
         "anthropic": frozenset({"claude-3-5-haiku-latest"}),
-        "groq": frozenset({"llama-3.3-70b-versatile"}),
+        "groq": GROQ_CURRENT_MODELS,
     },
     "stt": {
         "openai": frozenset({"gpt-4o-mini-transcribe"}),
@@ -47,6 +62,13 @@ PLATFORM_MODEL_ALLOWLIST: dict[str, dict[str, frozenset[str]]] = {
         "elevenlabs": frozenset({"eleven_flash_v2_5"}),
     },
 }
+
+
+def resolve_groq_model(requested: str, configured: str = "") -> str:
+    candidate = requested.strip()
+    if not candidate.startswith(GROQ_NATIVE_PREFIXES):
+        candidate = configured.strip() or GROQ_DEFAULT_MODEL
+    return GROQ_RETIRED_MODELS.get(candidate, candidate)
 
 
 def enforce_platform_model(kind: str, provider: str, model: str, source: str) -> str:

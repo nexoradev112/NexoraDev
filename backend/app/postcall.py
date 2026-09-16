@@ -25,6 +25,7 @@ from .integration_vault import decrypt_integration_secret
 from .licensing import LicenseClaims, require_feature, verified_claims
 from .models import Agent, AuditLog, CallSession, Integration, License, PostCallResult
 from .provider_runtime import create_chat_completion, extract_json_object
+from .provider_vault import GROQ_CURRENT_MODELS
 from .security import now_utc
 
 MAX_WEBHOOK_BODY_BYTES = 64 * 1024
@@ -45,7 +46,7 @@ ALLOWED_DISPOSITIONS = {
 }
 ALLOWED_QA_MODELS = {
     "openai": frozenset({"gpt-4.1-mini", "gpt-4o-mini"}),
-    "groq": frozenset({"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}),
+    "groq": GROQ_CURRENT_MODELS,
     "anthropic": frozenset({"claude-3-5-haiku-latest", "claude-sonnet-4-6"}),
 }
 HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,80}$")

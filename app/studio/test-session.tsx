@@ -11,6 +11,7 @@ export default function TestSession({ agentId, workspaceId, agentName, brand, on
   const [status, setStatus] = useState("Ready");
   const [micOn, setMicOn] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [voiceNotice, setVoiceNotice] = useState("");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatLine[]>([{ role: "system", text: "Start voice when you are ready, or test by typing below." }]);
 
@@ -33,8 +34,12 @@ export default function TestSession({ agentId, workspaceId, agentName, brand, on
     room.on(RoomEvent.ParticipantConnected, () => setMessages(current => [...current, { role: "system", text: "Voice agent joined the test room." }]));
     try {
       const response = await fetch("/api/livekit/token", { method: "POST", headers: { "content-type": "application/json", "x-workspace-id": String(workspaceId) }, body: JSON.stringify({ agentId, sessionId: crypto.randomUUID() }) });
-      const data = await response.json() as { server_url?: string; participant_token?: string; error?: string };
+      const data = await response.json() as { server_url?: string; participant_token?: string; error?: string; voice_notice?: string; voiceNotice?: string };
       if (!response.ok || !data.server_url || !data.participant_token) throw new Error(data.error || "Realtime voice is unavailable");
+      const notice = data.voice_notice || data.voiceNotice || "";
+      if (notice) {
+        setVoiceNotice(notice);
+      }
       await room.connect(data.server_url, data.participant_token);
       await room.localParticipant.setMicrophoneEnabled(true);
       roomRef.current = room;
@@ -75,6 +80,7 @@ export default function TestSession({ agentId, workspaceId, agentName, brand, on
   return <div className="test-drawer" role="dialog" aria-label={`Test ${agentName}`}>
     <div><b>Test {agentName}</b><button type="button" onClick={onClose} aria-label="Close test">×</button></div>
     <p className="test-status"><span className={micOn ? "voice-live" : ""}>●</span> {status}</p>
+    {voiceNotice ? <p className="settings-notice" role="status">{voiceNotice}</p> : null}
     <div className="test-feed">{messages.map((message, index) => <p key={`${message.role}-${index}`} className={message.role === "user" ? "user-msg" : message.role === "agent" ? "agent-msg" : "system-msg"}>{message.role === "agent" ? <small>{brand} agent</small> : null}{message.text}</p>)}</div>
     <div ref={audioRef} hidden/>
     <div className="voice-controls"><button type="button" onClick={() => void (roomRef.current ? toggleMic() : startVoice())} disabled={connecting}>{roomRef.current ? (micOn ? "Mute microphone" : "Unmute microphone") : "Start voice test"}</button></div>

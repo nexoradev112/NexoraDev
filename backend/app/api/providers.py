@@ -70,7 +70,7 @@ _SECRET_VALUE_RE = re.compile(
     r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"\b(?:api[_ -]?key|access[_ -]?token|password|client[_ -]?secret)\s*[:=])"
 )
-_PUBLIC_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
+_PUBLIC_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 _LANGUAGE_CODE_RE = re.compile(r"^(?:auto|multi|[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?)$")
 
 

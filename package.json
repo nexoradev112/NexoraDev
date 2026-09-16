@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "test": "next build",
+    "test:unit": "node --experimental-strip-types --test lib/format-date.test.ts",
     "lint": "eslint . --ignore-pattern .next"
   },
   "dependencies": {

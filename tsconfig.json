@@ -27,7 +27,7 @@
     "next.config.ts",
     "app/**/*.ts",
     "app/**/*.tsx",
-    "lib/server-api.ts",
+    "lib/**/*.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],

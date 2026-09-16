@@ -175,8 +175,13 @@ class PlatformTokenBudgetTests(unittest.IsolatedAsyncioTestCase):
             "runtimeProviders": {"llm": {"credentialSource": "byok"}},
             "runtimePolicy": {"approvedTokens": 0},
         }
+        inference = {
+            "runtimeProviders": {"llm": {"credentialSource": "platform", "inference": True}},
+            "runtimePolicy": {"approvedTokens": 0},
+        }
         self.assertEqual(platform_llm_token_budget(platform), 12_000)
         self.assertIsNone(platform_llm_token_budget(byok))
+        self.assertIsNone(platform_llm_token_budget(inference))
         platform["runtimePolicy"] = {"approvedTokens": 0}
         with self.assertRaisesRegex(RuntimeError, "budget is unavailable"):
             platform_llm_token_budget(platform)

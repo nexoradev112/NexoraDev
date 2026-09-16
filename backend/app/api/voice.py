@@ -28,14 +28,21 @@ from ..licensing import (
     verified_claims,
 )
 from ..livekit_urls import exact_livekit_origin
-from ..models import Agent, AuditLog, CallSession, License, StoredFile, UsageEvent, Workspace
+from ..models import Agent, AuditLog, CallSession, License, ProviderConnection, StoredFile, UsageEvent, Workspace
+from ..provider_runtime import expand_llm_provider_order
+from ..provider_vault import (
+    RuntimeCredential,
+    SUPPORTED_PROVIDERS,
+    enforce_platform_model,
+    resolve_groq_model,
+    resolve_runtime_credential,
+)
 from ..postcall import (
     post_call_stats,
     prepare_post_call_jobs,
     run_post_call_background,
     snapshot_post_call_plan,
 )
-from ..provider_vault import RuntimeCredential, enforce_platform_model, resolve_runtime_credential
 from ..security import authenticate_worker, now_utc
 from ..storage import resolve_storage_key
 from ..worker_envelope import seal_runtime_providers
@@ -114,7 +121,7 @@ def livekit_token(
     access: Annotated[WorkspaceAccess, Depends(require_workspace("member", "voice"))],
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, str]:
+) -> dict[str, object]:
     agent = db.scalar(
         select(Agent).where(
             Agent.id == body.agent_id,
@@ -259,7 +266,17 @@ def livekit_token(
         )
     )
     db.commit()
-    return {"server_url": public_url, "participant_token": participant_token, "room_name": room_name}
+    runtime = resolve_agent_runtime_providers(db, access.license, agent_snapshot, settings)
+    fallback = [kind for kind in ("llm", "stt", "tts") if kind in (runtime.get("inferenceFallback") or [])]
+    payload: dict[str, object] = {
+        "server_url": public_url,
+        "participant_token": participant_token,
+        "room_name": room_name,
+    }
+    if fallback:
+        payload["voice_notice"] = voice_inference_notice(fallback)
+        payload["inference_fallback"] = fallback
+    return payload
 
 
 class RoomBody(BaseModel):
@@ -280,7 +297,7 @@ def _runtime_descriptor(
 ) -> dict[str, Any]:
     defaults = {
         ("llm", "openai"): "gpt-4.1-mini",
-        ("llm", "groq"): "llama-3.3-70b-versatile",
+        ("llm", "groq"): "openai/gpt-oss-120b",
         ("llm", "anthropic"): "claude-3-5-haiku-latest",
         ("stt", "elevenlabs"): "scribe_v2_realtime",
         ("stt", "openai"): "gpt-4o-mini-transcribe",
@@ -292,11 +309,13 @@ def _runtime_descriptor(
     agent_model = str(agent_snapshot.get("model") or "")
     if kind == "llm" and (
         (credential.provider == "openai" and agent_model.startswith("gpt-"))
-        or (credential.provider == "groq" and agent_model.startswith(("llama", "mixtral", "gemma")))
+        or (credential.provider == "groq" and agent_model.startswith(("llama", "mixtral", "gemma", "openai/", "qwen/")))
         or (credential.provider == "anthropic" and agent_model.startswith("claude-"))
     ):
         configured_model = agent_model
     selected_model = configured_model or defaults.get((kind, credential.provider), "")
+    if kind == "llm" and credential.provider == "groq":
+        selected_model = resolve_groq_model(selected_model, credential.config.get("model", ""))
     selected_model = enforce_platform_model(kind, credential.provider, selected_model, credential.source)
     result: dict[str, Any] = {
         "provider": credential.provider,
@@ -314,6 +333,59 @@ def _runtime_descriptor(
     return result
 
 
+LIVEKIT_INFERENCE_MODELS = {
+    "stt": {"model": "elevenlabs/scribe_v2_realtime"},
+    "llm": {"model": "openai/gpt-4.1-mini"},
+    "tts": {"model": "elevenlabs/eleven_flash_v2_5", "voice": "Rachel"},
+}
+
+
+def voice_inference_notice(missing: list[str]) -> str:
+    labels = {"llm": "LLM", "stt": "speech-to-text (STT)", "tts": "text-to-speech (TTS)"}
+    named = [labels[kind] for kind in missing if kind in labels]
+    joined = " and ".join(named) if len(named) <= 2 else f"{', '.join(named[:-1])}, and {named[-1]}"
+    verb = "is" if len(named) == 1 else "are"
+    return (
+        f"Tenant {joined} {verb} not configured. This voice session uses LiveKit Inference. "
+        "Add Deepgram, ElevenLabs, or OpenAI keys in Settings → Providers to use your own STT/TTS."
+    )
+
+
+def _inference_descriptor(kind: str) -> dict[str, Any]:
+    return {
+        "provider": "livekit",
+        "credentialSource": "platform",
+        "inference": True,
+        **LIVEKIT_INFERENCE_MODELS[kind],
+    }
+
+
+def _provider_order_for_kind(
+    db: Session,
+    claims: LicenseClaims,
+    kind: str,
+    provider_order: list[object],
+) -> list[str]:
+    ordered = [provider for provider in provider_order if isinstance(provider, str)]
+    if kind == "llm":
+        return expand_llm_provider_order(db, claims, ordered)
+    allowed = SUPPORTED_PROVIDERS.get(kind, set())
+    result = [provider for provider in ordered if provider in allowed]
+    if provider_source(claims, kind) != "byok":
+        return result
+    extras = db.scalars(
+        select(ProviderConnection.provider).where(
+            ProviderConnection.workspace_id == claims.license.workspace_id,
+            ProviderConnection.kind == kind,
+            ProviderConnection.status == "active",
+        )
+    )
+    for provider in extras:
+        if provider in allowed and provider not in result:
+            result.append(provider)
+    return result
+
+
 def resolve_agent_runtime_providers(
     db: Session,
     claims: LicenseClaims,
@@ -328,14 +400,13 @@ def resolve_agent_runtime_providers(
     policy = agent_snapshot.get("providerPolicy")
     if not isinstance(policy, dict):
         raise HTTPException(status_code=409, detail="Call agent snapshot is invalid")
+    missing: list[str] = []
     for kind in ("llm", "stt", "tts"):
         configured = False
         provider_order = policy.get(kind, [])
         if not isinstance(provider_order, list):
             raise HTTPException(status_code=409, detail="Call provider snapshot is invalid")
-        for provider in provider_order:
-            if not isinstance(provider, str):
-                raise HTTPException(status_code=409, detail="Call provider snapshot is invalid")
+        for provider in _provider_order_for_kind(db, claims, kind, provider_order):
             try:
                 credential = resolve_runtime_credential(db, claims, kind, provider, settings)
             except HTTPException as exc:
@@ -346,7 +417,14 @@ def resolve_agent_runtime_providers(
             configured = True
             break
         if not configured:
-            raise HTTPException(status_code=503, detail=f"No configured {kind} provider is available")
+            missing.append(kind)
+    if missing:
+        if provider_source(claims, "realtime") != "platform":
+            raise HTTPException(status_code=503, detail=f"No configured {missing[0]} provider is available")
+        for kind in ("llm", "stt", "tts"):
+            runtime_providers[kind] = _inference_descriptor(kind)
+        runtime_providers["transport"] = "livekit_inference"
+        runtime_providers["inferenceFallback"] = missing
     return runtime_providers
 
 

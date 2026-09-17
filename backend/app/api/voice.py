@@ -304,6 +304,7 @@ def _runtime_descriptor(
         ("stt", "deepgram"): "nova-3",
         ("tts", "elevenlabs"): "eleven_flash_v2_5",
         ("tts", "openai"): "gpt-4o-mini-tts",
+        ("tts", "deepgram"): "aura-2-andromeda-en",
     }
     configured_model = credential.config.get("model", "")
     agent_model = str(agent_snapshot.get("model") or "")
@@ -328,6 +329,10 @@ def _runtime_descriptor(
     elif kind == "tts":
         if credential.provider == "elevenlabs":
             result["voice"] = credential.config.get("voiceId", "21m00Tcm4TlvDq8ikWAM")
+        elif credential.provider == "deepgram":
+            voice = credential.config.get("voice", "")
+            if voice:
+                result["voice"] = voice
         else:
             result["voice"] = credential.config.get("voice", "ash")
     return result

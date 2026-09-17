@@ -27,7 +27,7 @@ const tabs = ["license", "providers", "members"] as const;
 const providerCatalog: Record<string, string[]> = {
   llm: ["openai", "groq", "anthropic"],
   stt: ["deepgram", "elevenlabs", "openai"],
-  tts: ["elevenlabs", "openai"],
+  tts: ["elevenlabs", "openai", "deepgram"],
 };
 
 export default function TenantSettings({ user, workspace, initialTab, licenseRequired }: { user: AppUser; workspace: AppWorkspace; initialTab?: string; licenseRequired: boolean }) {

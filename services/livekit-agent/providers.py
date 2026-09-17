@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,6 +34,21 @@ for _plugin_name in ("openai", "elevenlabs", "deepgram", "anthropic"):
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$")
 _ENVELOPE_AAD_PREFIX = b"nexora-runtime-providers:v1:"
+_DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+_ELEVENLABS_VOICE_ALIASES = {
+    "rachel": _DEFAULT_ELEVENLABS_VOICE_ID,
+    "elevenlabs-rachel": _DEFAULT_ELEVENLABS_VOICE_ID,
+    "elevenlabs/rachel": _DEFAULT_ELEVENLABS_VOICE_ID,
+}
+_DEFAULT_DEEPGRAM_TTS_MODEL = "aura-2-andromeda-en"
+_DEEPGRAM_TTS_VOICE_ALIASES = {
+    "andromeda": "aura-2-andromeda-en",
+    "asteria": "aura-2-asteria-en",
+    "thalia": "aura-2-thalia-en",
+    "apollo": "aura-2-apollo-en",
+    "athena": "aura-2-athena-en",
+    "odysseus": "aura-2-odysseus-en",
+}
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -278,24 +294,60 @@ def _build_direct_stt(stt_config: Mapping[str, object], locale: str) -> object:
     raise ProviderConfigurationError("Unsupported STT provider")
 
 
+def _elevenlabs_voice_id(tts_config: Mapping[str, object]) -> str:
+    raw = _model(tts_config, "voice", _DEFAULT_ELEVENLABS_VOICE_ID).strip()
+    if not raw:
+        return _DEFAULT_ELEVENLABS_VOICE_ID
+    return _ELEVENLABS_VOICE_ALIASES.get(raw.lower(), raw)
+
+
+def _deepgram_tts_model(tts_config: Mapping[str, object]) -> str:
+    model = _model(tts_config, "model", _DEFAULT_DEEPGRAM_TTS_MODEL).strip()
+    voice = str(tts_config.get("voice") or "").strip()
+    if voice:
+        if not _NAME_RE.fullmatch(voice):
+            raise ProviderConfigurationError("Provider voice is invalid")
+        if voice.lower().startswith("aura-"):
+            return voice
+        alias = _DEEPGRAM_TTS_VOICE_ALIASES.get(voice.lower())
+        if alias:
+            return alias
+    return _DEEPGRAM_TTS_VOICE_ALIASES.get(model.lower(), model or _DEFAULT_DEEPGRAM_TTS_MODEL)
+
+
 def _build_direct_tts(tts_config: Mapping[str, object]) -> object:
+    from livekit.agents.tts import StreamAdapter
     from livekit.plugins import elevenlabs, openai
 
     tts_provider = _provider_name(tts_config)
     tts_key = _required_key(tts_config, "TTS")
     if tts_provider == "elevenlabs":
-        return elevenlabs.TTS(
+        # Zero-retention and language-normalization query flags are enterprise-only.
+        # On Creator/starter keys they make the websocket finish with isFinal and
+        # no audio, which LiveKit reports as "no audio frames were pushed".
+        # Use the HTTP chunked API via StreamAdapter; the websocket path is the
+        # one that returns empty audio on these accounts.
+        tts = elevenlabs.TTS(
             model=_model(tts_config, "model", "eleven_flash_v2_5"),
-            voice_id=_model(tts_config, "voice", "21m00Tcm4TlvDq8ikWAM"),
+            voice_id=_elevenlabs_voice_id(tts_config),
             api_key=tts_key,
-            apply_language_text_normalization=True,
-            enable_logging=False,
         )
+        return StreamAdapter(tts=tts)
     if tts_provider == "openai":
         return openai.TTS(
             model=_model(tts_config, "model", "gpt-4o-mini-tts"),
             voice=_model(tts_config, "voice", "ash"),
             api_key=tts_key,
+        )
+    if tts_provider == "deepgram":
+        try:
+            from livekit.plugins import deepgram
+        except ImportError as error:
+            raise ProviderConfigurationError("Deepgram voice plugin is not installed") from error
+        return deepgram.TTS(
+            model=_deepgram_tts_model(tts_config),
+            api_key=tts_key,
+            mip_opt_out=True,
         )
     raise ProviderConfigurationError("Unsupported TTS provider")
 
@@ -306,12 +358,16 @@ def _direct_stack(
     *,
     max_completion_tokens: int | None,
 ) -> ProviderStack:
+    # Silero VAD plus TTS/room audio both construct soxr resamplers. On Windows
+    # the first concurrent init hits a debug assert in livekit_ffi.dll
+    # (LSX_FFT_BR == NULL) and pops a Visual C++ abort dialog.
+    use_local_vad = sys.platform != "win32"
     return ProviderStack(
         stt=_build_direct_stt(_provider_config(runtime, "stt"), locale),
         llm=_build_direct_llm(_provider_config(runtime, "llm"), max_completion_tokens=max_completion_tokens),
         tts=_build_direct_tts(_provider_config(runtime, "tts")),
-        vad=_local_vad(),
-        turn_detection="vad",
+        vad=_local_vad() if use_local_vad else None,
+        turn_detection="vad" if use_local_vad else "stt",
     )
 
 
@@ -324,9 +380,28 @@ def _local_vad() -> object:
     return _LOCAL_VAD
 
 
-def prewarm_local_vad() -> object:
+def prewarm_audio_resampler() -> None:
+    """Initialize soxr's process-global FFT tables on one thread.
+
+    livekit_ffi.dll asserts `LSX_FFT_BR == NULL` if two resamplers first-touch
+    the cache at the same time. Warm common rate pairs before the session starts.
+    """
+
+    from livekit import rtc
+
+    for input_rate, output_rate in ((48000, 16000), (22050, 48000), (24000, 48000), (44100, 48000)):
+        samples = max(1, input_rate // 100)
+        frame = rtc.AudioFrame.create(input_rate, 1, samples)
+        resampler = rtc.AudioResampler(input_rate, output_rate, num_channels=1)
+        resampler.push(frame)
+        resampler.flush()
+
+
+def prewarm_local_vad() -> object | None:
     """Load the local VAD during worker-process setup, before the first call."""
 
+    if sys.platform == "win32":
+        return None
     return _local_vad()
 
 

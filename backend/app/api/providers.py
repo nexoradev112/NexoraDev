@@ -58,6 +58,7 @@ GENERIC_PUBLIC_FIELDS: dict[tuple[str, str], frozenset[str]] = {
     ("stt", "elevenlabs"): frozenset({"model", "languageCode"}),
     ("tts", "elevenlabs"): frozenset({"model", "voiceId"}),
     ("tts", "openai"): frozenset({"model", "voice"}),
+    ("tts", "deepgram"): frozenset({"model", "voice"}),
     ("realtime", "livekit"): frozenset(),
 }
 _SECRET_FIELD_RE = re.compile(

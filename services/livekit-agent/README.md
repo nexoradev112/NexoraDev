@@ -83,7 +83,7 @@ Supported direct plugins are:
 | --- | --- |
 | LLM | OpenAI, Groq through the OpenAI-compatible plugin, Anthropic |
 | STT | OpenAI, Deepgram, ElevenLabs |
-| TTS | OpenAI, ElevenLabs |
+| TTS | OpenAI, ElevenLabs, Deepgram |
 | VAD | local Silero |
 
 Provider availability and language quality must be verified with the exact

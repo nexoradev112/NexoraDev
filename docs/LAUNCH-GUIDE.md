@@ -87,7 +87,7 @@ Provider support in the direct worker is:
 | --- | --- |
 | LLM | OpenAI, Groq, Anthropic |
 | STT | Deepgram, OpenAI, ElevenLabs |
-| TTS | ElevenLabs, OpenAI |
+| TTS | ElevenLabs, OpenAI, Deepgram |
 | Realtime | deployment LiveKit project |
 
 Arabic, US/UK English, Hindi, and Hinglish depend on both the agent locale and

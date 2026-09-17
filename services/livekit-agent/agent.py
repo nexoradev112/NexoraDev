@@ -31,6 +31,7 @@ from livekit.agents.utils.audio import audio_frames_from_file
 from providers import (
     build_provider_stack,
     decrypt_runtime_providers_envelope,
+    prewarm_audio_resampler,
     prewarm_local_vad,
 )
 from rails import (
@@ -582,6 +583,7 @@ server = AgentServer()
 
 def _prewarm_worker(_process) -> None:
     start_completion_spool_flusher()
+    prewarm_audio_resampler()
     prewarm_local_vad()
 
 

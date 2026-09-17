@@ -16,7 +16,7 @@ from .models import ProviderConnection
 SUPPORTED_PROVIDERS: dict[str, set[str]] = {
     "llm": {"openai", "anthropic", "groq"},
     "stt": {"deepgram", "openai", "elevenlabs"},
-    "tts": {"elevenlabs", "openai"},
+    "tts": {"elevenlabs", "openai", "deepgram"},
     "realtime": {"livekit"},
     "telephony": {
         "twilio",
@@ -60,6 +60,7 @@ PLATFORM_MODEL_ALLOWLIST: dict[str, dict[str, frozenset[str]]] = {
     "tts": {
         "openai": frozenset({"gpt-4o-mini-tts"}),
         "elevenlabs": frozenset({"eleven_flash_v2_5"}),
+        "deepgram": frozenset({"aura-2-andromeda-en"}),
     },
 }
 
@@ -156,6 +157,9 @@ def platform_credential(kind: str, provider: str, settings: Settings) -> Runtime
     elif kind == "tts" and provider == "openai":
         secret = settings.OPENAI_API_KEY
         config = {"base_url": "https://api.openai.com/v1"}
+    elif kind == "tts" and provider == "deepgram":
+        secret = settings.DEEPGRAM_API_KEY
+        config = {"base_url": "https://api.deepgram.com/v1"}
     elif kind == "stt" and provider == "deepgram":
         secret = settings.DEEPGRAM_API_KEY
         config = {"base_url": "https://api.deepgram.com/v1"}

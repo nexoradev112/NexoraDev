@@ -149,6 +149,29 @@ def test_generic_public_config_is_capability_scoped_and_legacy_values_are_filter
     assert listed.status_code == 200, listed.text
     assert listed.json()["connections"][0]["config"] == {"model": "gpt-4.1-mini"}
     assert "telephony" not in listed.json()["supported"]
+    assert "deepgram" in listed.json()["supported"]["tts"]
+    assert "deepgram" in listed.json()["supported"]["stt"]
+
+
+def test_deepgram_tts_accepts_aura_model_and_voice(tenant, superadmin, origin):
+    workspace_id = _register(tenant, origin, "deepgram-tts@example.com", "Deepgram TTS tenant")
+    _issue_and_activate(tenant, superadmin, origin, workspace_id, features=["providers"])
+    headers = origin | {"x-workspace-id": str(workspace_id)}
+
+    saved = tenant.post(
+        "/api/providers",
+        headers=headers,
+        json={
+            "kind": "tts",
+            "provider": "deepgram",
+            "secret": "tenant-deepgram-tts-key",
+            "config": {"model": "aura-2-andromeda-en", "voice": "thalia"},
+        },
+    )
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["connection"]["provider"] == "deepgram"
+    assert saved.json()["connection"]["kind"] == "tts"
+    assert saved.json()["connection"]["config"] == {"model": "aura-2-andromeda-en", "voice": "thalia"}
 
 
 def test_disable_uses_feature_for_stored_kind_and_stays_tenant_scoped(tenant, superadmin, origin):

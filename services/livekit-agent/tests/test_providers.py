@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import sys
 import unittest
 from unittest import mock
 
@@ -11,7 +12,12 @@ from providers import (
     _SILERO_PLUGIN,
     build_provider_stack,
     decrypt_runtime_providers_envelope,
+    prewarm_audio_resampler,
 )
+
+
+def _passthrough_stream_adapter(**kwargs):
+    return kwargs["tts"]
 
 
 class ProviderResolutionTests(unittest.TestCase):
@@ -125,14 +131,20 @@ class ProviderResolutionTests(unittest.TestCase):
             },
         }
         with (
-            mock.patch("providers._local_vad", return_value="local-vad"),
+            mock.patch("providers._local_vad", return_value="local-vad") as vad,
             mock.patch("livekit.plugins.openai.LLM", return_value="tenant-llm"),
             mock.patch("livekit.plugins.elevenlabs.STT", return_value="tenant-stt"),
             mock.patch("livekit.plugins.elevenlabs.TTS", return_value="tenant-tts"),
+            mock.patch("livekit.agents.tts.StreamAdapter", side_effect=_passthrough_stream_adapter),
         ):
             stack = build_provider_stack(runtime)
-        self.assertEqual(stack.vad, "local-vad")
-        self.assertEqual(stack.turn_detection, "vad")
+        if sys.platform == "win32":
+            self.assertIsNone(stack.vad)
+            self.assertEqual(stack.turn_detection, "stt")
+            vad.assert_not_called()
+        else:
+            self.assertEqual(stack.vad, "local-vad")
+            self.assertEqual(stack.turn_detection, "vad")
         self.assertEqual((stack.llm, stack.stt, stack.tts), ("tenant-llm", "tenant-stt", "tenant-tts"))
 
     def test_platform_llm_requires_and_receives_hard_output_limit(self) -> None:
@@ -170,11 +182,146 @@ class ProviderResolutionTests(unittest.TestCase):
             mock.patch("livekit.plugins.openai.LLM", return_value="platform-llm") as llm,
             mock.patch("livekit.plugins.elevenlabs.STT", return_value="platform-stt"),
             mock.patch("livekit.plugins.elevenlabs.TTS", return_value="platform-tts"),
+            mock.patch("livekit.agents.tts.StreamAdapter", side_effect=_passthrough_stream_adapter),
         ):
             stack = build_provider_stack(runtime, max_completion_tokens=128)
 
         self.assertEqual(stack.llm, "platform-llm")
         self.assertEqual(llm.call_args.kwargs["max_completion_tokens"], 128)
+
+    def test_elevenlabs_tts_omits_enterprise_only_flags_and_maps_named_voices(self) -> None:
+        runtime = {
+            "locale": "en-US",
+            "runtimeProviders": {
+                "transport": "direct",
+                "mode": "byok",
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-4.1-mini",
+                    "apiKey": "tenant-openai-key",
+                    "credentialSource": "byok",
+                },
+                "stt": {
+                    "provider": "elevenlabs",
+                    "model": "scribe_v2_realtime",
+                    "apiKey": "tenant-eleven-key",
+                    "credentialSource": "byok",
+                },
+                "tts": {
+                    "provider": "elevenlabs",
+                    "model": "eleven_flash_v2_5",
+                    "voice": "Rachel",
+                    "apiKey": "tenant-eleven-key",
+                    "credentialSource": "byok",
+                },
+            },
+        }
+        with (
+            mock.patch("providers._local_vad", return_value="local-vad"),
+            mock.patch("livekit.plugins.openai.LLM", return_value="tenant-llm"),
+            mock.patch("livekit.plugins.elevenlabs.STT", return_value="tenant-stt"),
+            mock.patch("livekit.plugins.elevenlabs.TTS", return_value="tenant-tts") as tts,
+            mock.patch("livekit.agents.tts.StreamAdapter", side_effect=_passthrough_stream_adapter) as adapter,
+        ):
+            build_provider_stack(runtime)
+        kwargs = tts.call_args.kwargs
+        self.assertEqual(kwargs["voice_id"], "21m00Tcm4TlvDq8ikWAM")
+        self.assertEqual(kwargs["model"], "eleven_flash_v2_5")
+        self.assertNotIn("apply_language_text_normalization", kwargs)
+        self.assertNotEqual(kwargs.get("enable_logging"), False)
+        adapter.assert_called_once()
+
+    def test_deepgram_tts_maps_named_voices_and_uses_tenant_key(self) -> None:
+        runtime = {
+            "locale": "en-US",
+            "runtimeProviders": {
+                "transport": "direct",
+                "mode": "byok",
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-4.1-mini",
+                    "apiKey": "tenant-openai-key",
+                    "credentialSource": "byok",
+                },
+                "stt": {
+                    "provider": "deepgram",
+                    "model": "nova-3",
+                    "apiKey": "tenant-deepgram-key",
+                    "credentialSource": "byok",
+                },
+                "tts": {
+                    "provider": "deepgram",
+                    "model": "aura-2-andromeda-en",
+                    "voice": "thalia",
+                    "apiKey": "tenant-deepgram-tts-key",
+                    "credentialSource": "byok",
+                },
+            },
+        }
+        with (
+            mock.patch("providers._local_vad", return_value="local-vad"),
+            mock.patch("livekit.plugins.openai.LLM", return_value="tenant-llm"),
+            mock.patch("livekit.plugins.deepgram.STT", return_value="tenant-stt"),
+            mock.patch("livekit.plugins.deepgram.TTS", return_value="tenant-tts") as tts,
+        ):
+            stack = build_provider_stack(runtime)
+        self.assertEqual(stack.tts, "tenant-tts")
+        kwargs = tts.call_args.kwargs
+        self.assertEqual(kwargs["model"], "aura-2-thalia-en")
+        self.assertEqual(kwargs["api_key"], "tenant-deepgram-tts-key")
+        self.assertTrue(kwargs["mip_opt_out"])
+
+    def test_windows_direct_stack_uses_stt_turn_detection(self) -> None:
+        runtime = {
+            "locale": "en-US",
+            "runtimeProviders": {
+                "transport": "direct",
+                "mode": "byok",
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-4.1-mini",
+                    "apiKey": "tenant-openai-key",
+                    "credentialSource": "byok",
+                },
+                "stt": {
+                    "provider": "elevenlabs",
+                    "model": "scribe_v2_realtime",
+                    "apiKey": "tenant-eleven-key",
+                    "credentialSource": "byok",
+                },
+                "tts": {
+                    "provider": "elevenlabs",
+                    "model": "eleven_flash_v2_5",
+                    "voice": "21m00Tcm4TlvDq8ikWAM",
+                    "apiKey": "tenant-eleven-key",
+                    "credentialSource": "byok",
+                },
+            },
+        }
+        with (
+            mock.patch("providers.sys.platform", "win32"),
+            mock.patch("providers._local_vad", return_value="local-vad") as vad,
+            mock.patch("livekit.plugins.openai.LLM", return_value="tenant-llm"),
+            mock.patch("livekit.plugins.elevenlabs.STT", return_value="tenant-stt"),
+            mock.patch("livekit.plugins.elevenlabs.TTS", return_value="tenant-tts"),
+            mock.patch("livekit.agents.tts.StreamAdapter", side_effect=_passthrough_stream_adapter),
+        ):
+            stack = build_provider_stack(runtime)
+        self.assertIsNone(stack.vad)
+        self.assertEqual(stack.turn_detection, "stt")
+        vad.assert_not_called()
+
+    def test_audio_resampler_prewarm_pushes_common_rate_pairs(self) -> None:
+        resampler = mock.Mock()
+        with (
+            mock.patch("livekit.rtc.AudioFrame.create", return_value="silence") as create,
+            mock.patch("livekit.rtc.AudioResampler", return_value=resampler) as ctor,
+        ):
+            prewarm_audio_resampler()
+        self.assertGreaterEqual(ctor.call_count, 2)
+        self.assertEqual(create.call_count, ctor.call_count)
+        self.assertEqual(resampler.push.call_count, ctor.call_count)
+        self.assertEqual(resampler.flush.call_count, ctor.call_count)
 
 
 class ProviderEnvelopeTests(unittest.TestCase):

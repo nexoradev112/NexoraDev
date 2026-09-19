@@ -85,4 +85,4 @@ function toFlowNode(node:WorkflowNode,index:number):FlowNode<NodeData>{return{id
 function fromFlowNode(node:FlowNode<NodeData>):WorkflowNode{return{id:node.id,type:node.data.kind,label:node.data.label,prompt:node.data.prompt,position:node.position,config:node.data.config}}
 function toFlowEdge(edge:WorkflowEdge):Edge{return{id:edge.id,source:edge.source,target:edge.target,label:edge.label,data:{condition:edge.condition||""},animated:edge.label==="after call"}}
 function fromFlowEdge(edge:Edge):WorkflowEdge{return{id:edge.id,source:edge.source,target:edge.target,label:typeof edge.label==="string"?edge.label:"",condition:typeof edge.data?.condition==="string"?edge.data.condition:""}}
-function nodeIcon(kind:string){return kind==="Router"?"◇":kind==="Guardrail"?"✓":kind==="Tool"?"↗":kind==="Webhook"?"⇢":kind==="QA"?"◎":kind==="Audio"?"♫":kind==="End"?"■":"✦"}
+function nodeIcon(kind:string){return({Agent:"✦",Knowledge:"⌕",Tool:"↗",Router:"◇",Guardrail:"✓",Handoff:"☎",Message:"✎",Audio:"♫",Webhook:"⇢",QA:"◎",End:"■",Trigger:"▶"} as Record<string,string>)[kind]||"✦"}

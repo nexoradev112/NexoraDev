@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..chat_rails import (
     ChatRailDecision,
     check_chat_input,
+    check_generated_agent,
     check_model_output,
     redact_sensitive,
     safe_handoff_message,
@@ -20,7 +21,7 @@ from ..dependencies import ROLE_LEVEL, WorkspaceAccess, require_workspace
 from ..licensing import active_license_for_workspace, require_feature
 from ..models import Agent, Membership, Workspace
 from ..provider_runtime import create_chat_completion, extract_json_object
-from .agents import AgentBody, create_agent
+from .agents import AgentBody, coerce_generated_workflow, create_agent
 
 router = APIRouter(tags=["chat"])
 
@@ -163,10 +164,13 @@ def generate_agent(
             {
                 "role": "system",
                 "content": (
-                    "Design a safe voice/chat agent. Return one JSON object with name, objective, greeting, "
-                    "globalPrompt, nodes and edges. Use 4-10 nodes from Trigger, Agent, Knowledge, Router, "
-                    "Guardrail, Tool, Handoff, Message, QA, End. Guardrail means a human approval gate. "
-                    "Always include Handoff and End. Do not include URLs, credentials, or invented data."
+                    "Design a safe voice/chat agent. Return only one JSON object with name, objective, "
+                    "greeting, globalPrompt, nodes and edges. Do not wrap it in markdown or add commentary. "
+                    "Each node must include id, type, label, and prompt. Each edge must include id, source, "
+                    "and target. Types must be exactly Trigger, Agent, Knowledge, Router, Guardrail, Tool, "
+                    "Handoff, Message, or End. Guardrail means a human approval gate. Always include "
+                    "Handoff and End. Keep node prompts to one sentence. Do not include URLs, credentials, "
+                    "or invented data."
                 ),
             },
             {
@@ -182,22 +186,29 @@ def generate_agent(
             },
         ],
         feature="agents",
+        max_tokens=4_096,
+        json_object=True,
     )
     db.commit()
-    checked_result = check_model_output(result.text)
+    generated = extract_json_object(result.text)
+    checked_result = check_generated_agent(result.text)
     if checked_result.blocked:
         raise HTTPException(status_code=502, detail="Generated agent requires human review")
-    generated = extract_json_object(checked_result.text)
-    workflow = {"nodes": generated.get("nodes", []), "edges": generated.get("edges", [])}
-    agent_body = AgentBody(
-        name=str(generated.get("name") or use_case.text)[:80],
-        objective=str(generated.get("objective") or description.text)[:2_000],
-        globalPrompt=str(generated.get("globalPrompt") or description.text)[:8_000],
-        greeting=str(generated.get("greeting") or "Hello, how can I help today?")[:500],
-        channel="voice + chat",
-        locale=body.locale,
-        workflow=workflow,
-    )
+    try:
+        workflow = coerce_generated_workflow(
+            {"nodes": generated.get("nodes", []), "edges": generated.get("edges", [])}
+        )
+        agent_body = AgentBody(
+            name=str(generated.get("name") or use_case.text)[:80],
+            objective=str(generated.get("objective") or description.text)[:2_000],
+            globalPrompt=str(generated.get("globalPrompt") or description.text)[:8_000],
+            greeting=str(generated.get("greeting") or "Hello, how can I help today?")[:500],
+            channel="voice + chat",
+            locale=body.locale,
+            workflow=workflow,
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=502, detail="Generated workflow was invalid") from exc
     db.scalar(
         select(Workspace)
         .where(Workspace.id == access.workspace.id)

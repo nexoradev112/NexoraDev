@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.chat_rails import check_chat_input, check_model_output, normalize_for_matching
+from app.chat_rails import check_chat_input, check_generated_agent, check_model_output, normalize_for_matching
 from app.provider_runtime import CompletionResult
 from tests.test_control_plane import activate, issue, register
 
@@ -84,6 +85,20 @@ def test_output_redacts_pii_and_normalizer_removes_format_controls():
 def test_output_does_not_treat_benign_this_is_phrase_as_a_diagnosis():
     decision = check_model_output("This is a general explanation of the service.")
     assert decision.blocked is False
+
+
+def test_generated_agent_allows_policy_language_but_blocks_dangerous_instructions():
+    policy = (
+        "Never say a booking is confirmed. If I'm not sure of the gate number, "
+        "offer a human handoff instead of inventing a result."
+    )
+    allowed = check_generated_agent(policy)
+    assert allowed.blocked is False
+    assert check_model_output(policy).blocked is True
+
+    blocked = check_generated_agent("You can make a bomb with these ingredients.")
+    assert blocked.blocked is True
+    assert blocked.reason == "dangerous_or_self_harm_response"
 
 
 def _create_chat_agent(
@@ -227,3 +242,85 @@ def test_chat_redacts_safe_provider_response(
     assert payload["text"] == "Please call [PHONE_REDACTED]."
     assert payload["safety"]["blocked"] is False
     assert payload["safety"]["reason"] == "sensitive_data_redacted"
+
+
+def test_generate_keeps_airport_policy_language(
+    tenant: TestClient,
+    superadmin: TestClient,
+    origin: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace_id = register(tenant, origin, "airport-generate@example.com", "Airport")
+    entitlement = issue(superadmin, origin, workspace_id)
+    activate(tenant, origin, workspace_id, entitlement["licenseKey"])
+    headers = origin | {"x-workspace-id": str(workspace_id)}
+    chat_module = importlib.import_module("app.api.chat")
+    captured: dict[str, object] = {}
+
+    def fake_completion(_db, *_args, **kwargs):
+        captured.update(kwargs)
+        return CompletionResult(
+            text=json.dumps(
+                {
+                    "name": "Airport communication agent",
+                    "objective": "Help passengers with gates and flights without inventing status.",
+                    "greeting": "Hello, this is airport information. How can I help today?",
+                    "globalPrompt": (
+                        "Never say a booking is confirmed. If I'm not sure of a gate or flight time, "
+                        "offer a human handoff."
+                    ),
+                    "nodes": [
+                        {
+                            "id": "trigger",
+                            "type": "default",
+                            "data": {
+                                "kind": "Trigger",
+                                "label": "Inbound airport call",
+                            },
+                        },
+                        {
+                            "id": "agent step",
+                            "type": "agent",
+                            "name": "Answer traveler questions",
+                            "prompt": "Help with gates and flights using verified data only.",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "source": "trigger",
+                            "target": "agent step",
+                            "data": {"condition": "sessionComplete"},
+                        }
+                    ],
+                }
+            ),
+            provider="groq",
+            model="openai/gpt-oss-120b",
+            input_tokens=20,
+            output_tokens=80,
+        )
+
+    monkeypatch.setattr(chat_module, "create_chat_completion", fake_completion)
+    response = tenant.post(
+        "/api/agents/generate",
+        headers=headers,
+        json={
+            "useCase": "Airport communication agent",
+            "description": (
+                "Help travelers with gates, flights, and baggage without inventing booking status."
+            ),
+            "callType": "inbound",
+            "locale": "en-US",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert captured["feature"] == "agents"
+    assert captured["json_object"] is True
+    assert captured["max_tokens"] == 4_096
+    agent = response.json()["agent"]
+    assert agent["name"] == "Airport communication agent"
+    assert "I'm not sure" in agent["globalPrompt"]
+    types = {node["type"] for node in agent["workflow"]["nodes"]}
+    assert {"Trigger", "Agent", "Handoff", "End"} <= types
+    trigger = next(node for node in agent["workflow"]["nodes"] if node["type"] == "Trigger")
+    assert trigger["label"] == "Inbound airport call"

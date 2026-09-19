@@ -47,7 +47,7 @@ def test_byok_chat_uses_saved_groq_when_agent_prefers_missing_anthropic(
     agent_id = _create_chat_agent(tenant, headers, ["openai", "anthropic"])
     called: list[str] = []
 
-    def fake_openai_compatible(credential, model, messages):
+    def fake_openai_compatible(credential, model, messages, **_kwargs):
         del model, messages
         called.append(credential.provider)
         return CompletionResult("hello from groq", credential.provider, "openai/gpt-oss-120b", 4, 6)
@@ -86,7 +86,7 @@ def test_byok_chat_does_not_mask_groq_failure_with_missing_anthropic(
     assert saved.status_code == 201, saved.text
     agent_id = _create_chat_agent(tenant, headers, ["openai", "anthropic", "groq"])
 
-    def fake_openai_compatible(credential, model, messages):
+    def fake_openai_compatible(credential, model, messages, **_kwargs):
         del model, messages
         raise provider_runtime.ProviderResponseError(
             f"{credential.provider} request failed",

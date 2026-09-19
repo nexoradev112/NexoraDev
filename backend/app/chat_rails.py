@@ -235,6 +235,27 @@ def check_model_output(text: str) -> ChatRailDecision:
     return ChatRailDecision(text=redacted, redactions=labels)
 
 
+def check_generated_agent(text: str) -> ChatRailDecision:
+    """Inspect a generated agent spec. This is not a live customer reply.
+
+    Draft prompts include negative policy such as "never say a booking is
+    confirmed" and "if I'm not sure, offer handoff". Those phrases are required
+    instructions, not claims made to a caller.
+    """
+
+    bounded = text[:MAX_TEXT_CHARS]
+    normalized = normalize_for_matching(bounded)
+    if any(pattern.search(normalized) for pattern in _DANGEROUS_PATTERNS):
+        return ChatRailDecision(
+            text="[HUMAN_HANDOFF_REQUIRED]",
+            blocked=True,
+            requires_handoff=True,
+            reason="dangerous_or_self_harm_response",
+        )
+    redacted, labels = redact_sensitive(bounded)
+    return ChatRailDecision(text=redacted, redactions=labels)
+
+
 def redact_sensitive(text: str) -> tuple[str, tuple[str, ...]]:
     """Redact common identifiers and secrets without retaining matched values."""
 

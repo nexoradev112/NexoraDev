@@ -41,7 +41,7 @@ def test_provider_fallback_cannot_start_after_concurrent_revoke(
     release_first_attempt = threading.Event()
     groq_called = threading.Event()
 
-    def fake_openai_compatible(credential, model, messages):
+    def fake_openai_compatible(credential, model, messages, **_kwargs):
         del model, messages
         if credential.provider == "openai":
             first_attempt_started.set()

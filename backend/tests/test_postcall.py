@@ -250,12 +250,15 @@ def test_post_call_qa_and_webhook_succeed_with_mocked_providers(tenant, superadm
         *,
         feature,
         allowed_models=None,
+        **_kwargs,
     ):
         assert feature == "post_call"
         assert claims.provider_mode == "byok"
         assert providers == ["openai"]
         assert model == "gpt-4.1-mini"
         assert allowed_models == ALLOWED_QA_MODELS
+        assert _kwargs.get("json_object") is True
+        assert _kwargs.get("max_tokens") == 2_048
         assert "untrusted data" in messages[0]["content"]
         return CompletionResult(
             text=json.dumps(

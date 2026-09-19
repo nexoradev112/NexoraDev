@@ -545,6 +545,8 @@ def _run_qa(
             ],
             feature="post_call",
             allowed_models=ALLOWED_QA_MODELS,
+            max_tokens=2_048,
+            json_object=True,
         )
         value = extract_json_object(completion.text)
     except HTTPException as exc:

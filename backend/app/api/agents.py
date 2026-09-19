@@ -36,6 +36,35 @@ NODE_TYPES = {
     "End",
 }
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$")
+_NODE_TYPE_ALIASES = {
+    "trigger": "Trigger",
+    "start": "Trigger",
+    "startevent": "Trigger",
+    "input": "Trigger",
+    "agent": "Agent",
+    "assistant": "Agent",
+    "llm": "Agent",
+    "knowledge": "Knowledge",
+    "rag": "Knowledge",
+    "router": "Router",
+    "condition": "Router",
+    "decision": "Router",
+    "guardrail": "Guardrail",
+    "approval": "Guardrail",
+    "tool": "Tool",
+    "action": "Tool",
+    "handoff": "Handoff",
+    "transfer": "Handoff",
+    "human": "Handoff",
+    "message": "Message",
+    "audio": "Audio",
+    "webhook": "Webhook",
+    "qa": "QA",
+    "end": "End",
+    "output": "End",
+    "finish": "End",
+}
+_GENERATED_SKIP_TYPES = {"Audio", "Webhook", "QA"}
 SECRET_MATERIAL = re.compile(
     r"(?:(?<![\w-])sk-[A-Za-z0-9_-]{16,}|\b(?:api[_ -]?key|access[_ -]?token|password)"
     r"\s*[:=]\s*[^\s,;]{6,})",
@@ -182,6 +211,195 @@ def validate_workflow(value: Any) -> dict[str, list[dict[str, Any]]]:
     if len(json.dumps(normalized, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > 256 * 1024:
         raise ValueError("Workflow exceeds the 256 KiB runtime limit")
     return normalized
+
+
+def _text_field(value: Any, limit: int) -> str:
+    if isinstance(value, str):
+        return value.strip()[:limit]
+    if isinstance(value, dict):
+        for key in ("label", "text", "name", "title", "prompt"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                return item.strip()[:limit]
+    return ""
+
+
+def _workflow_id(value: Any, fallback: str, used: set[str]) -> str:
+    raw = re.sub(r"[^a-zA-Z0-9._:/-]+", "-", _text_field(value, 100)).strip("-._:/")
+    if not raw or not IDENTIFIER.fullmatch(raw):
+        raw = fallback
+    base = raw[:100]
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        extra = f"-{suffix}"
+        candidate = f"{base[: 100 - len(extra)]}{extra}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _generated_node_type(raw: dict[str, Any]) -> str | None:
+    data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+    for candidate in (raw.get("type"), raw.get("kind"), data.get("kind"), data.get("type")):
+        if candidate in NODE_TYPES:
+            return str(candidate)
+        if not isinstance(candidate, str):
+            continue
+        mapped = _NODE_TYPE_ALIASES.get(re.sub(r"[^a-z0-9]", "", candidate.casefold()))
+        if mapped:
+            return mapped
+    return None
+
+
+def _generated_position(raw: dict[str, Any], index: int) -> dict[str, float]:
+    value = raw.get("position")
+    if not isinstance(value, dict):
+        data = raw.get("data")
+        value = data.get("position") if isinstance(data, dict) else None
+    coords: dict[str, float] = {}
+    if isinstance(value, dict):
+        for axis in ("x", "y"):
+            item = value.get(axis)
+            try:
+                number = float(item)
+            except (TypeError, ValueError):
+                continue
+            if abs(number) <= 100_000:
+                coords[axis] = round(number, 2)
+    if "x" not in coords or "y" not in coords:
+        return {"x": 120 + (index % 3) * 280, "y": 80 + (index // 3) * 170}
+    return coords
+
+
+def coerce_generated_workflow(value: Any) -> dict[str, list[dict[str, Any]]]:
+    """Turn model-authored graphs into the studio node/edge schema."""
+
+    if isinstance(value, list):
+        raw_nodes, raw_edges = value, []
+    elif isinstance(value, dict):
+        raw_nodes, raw_edges = value.get("nodes"), value.get("edges")
+    else:
+        raw_nodes, raw_edges = [], []
+    if not isinstance(raw_nodes, list):
+        raw_nodes = []
+    if not isinstance(raw_edges, list):
+        raw_edges = []
+
+    used_ids: set[str] = set()
+    id_map: dict[str, str] = {}
+    nodes: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_nodes[:100]):
+        if not isinstance(raw, dict):
+            continue
+        node_type = _generated_node_type(raw)
+        if node_type is None or node_type in _GENERATED_SKIP_TYPES:
+            continue
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        original_id = str(raw["id"]).strip() if raw.get("id") is not None else f"node-{index + 1}"
+        node_id = _workflow_id(original_id, f"node-{index + 1}", used_ids)
+        id_map[original_id] = node_id
+        id_map[node_id] = node_id
+        label = (
+            _text_field(raw.get("label"), 120)
+            or _text_field(data.get("label"), 120)
+            or _text_field(raw.get("name"), 120)
+            or node_type
+        )
+        prompt = _text_field(raw.get("prompt"), 8_000) or _text_field(data.get("prompt"), 8_000)
+        node: dict[str, Any] = {
+            "id": node_id,
+            "type": node_type,
+            "label": label,
+            "position": _generated_position(raw, index),
+        }
+        if prompt:
+            node["prompt"] = prompt
+        if node_type == "Guardrail":
+            node["config"] = {"approvalRole": "operator"}
+        nodes.append(node)
+
+    if not nodes:
+        nodes = [
+            {
+                "id": "trigger",
+                "type": "Trigger",
+                "label": "Start conversation",
+                "prompt": "Start when a caller or chat session connects.",
+                "position": {"x": 80, "y": 80},
+            },
+            {
+                "id": "agent",
+                "type": "Agent",
+                "label": "Handle the request",
+                "prompt": "Help using only verified information.",
+                "position": {"x": 380, "y": 80},
+            },
+        ]
+        used_ids = {node["id"] for node in nodes}
+
+    present = {node["type"] for node in nodes}
+    if "Handoff" not in present:
+        nodes.append(
+            {
+                "id": _workflow_id("handoff", "handoff", used_ids),
+                "type": "Handoff",
+                "label": "Transfer to a person",
+                "prompt": "Offer a human handoff when requested or confidence is low.",
+                "position": {"x": 980, "y": 180},
+            }
+        )
+    if "End" not in present:
+        nodes.append(
+            {
+                "id": _workflow_id("end", "end", used_ids),
+                "type": "End",
+                "label": "Summarize and finish",
+                "prompt": "Recap the confirmed outcome and close politely.",
+                "position": {"x": 1280, "y": 80},
+            }
+        )
+
+    valid_ids = {node["id"] for node in nodes}
+    used_edge_ids: set[str] = set()
+    edges: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_edges[:250]):
+        if not isinstance(raw, dict):
+            continue
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        source = id_map.get(str(raw.get("source") or ""), "")
+        target = id_map.get(str(raw.get("target") or ""), "")
+        if source not in valid_ids or target not in valid_ids or source == target:
+            continue
+        edge_id = _workflow_id(
+            raw.get("id") or f"e-{source}-{target}-{index + 1}",
+            f"e-{index + 1}",
+            used_edge_ids,
+        )
+        edge: dict[str, Any] = {"id": edge_id, "source": source, "target": target}
+        label = _text_field(raw.get("label"), 120) or _text_field(data.get("label"), 120)
+        condition = _text_field(raw.get("condition"), 500) or _text_field(data.get("condition"), 500)
+        if label:
+            edge["label"] = label
+        if condition:
+            edge["condition"] = condition
+        edges.append(edge)
+
+    if not edges and len(nodes) > 1:
+        for source, target in zip(nodes, nodes[1:], strict=False):
+            edges.append(
+                {
+                    "id": _workflow_id(
+                        f"e-{source['id']}-{target['id']}",
+                        "e-next",
+                        used_edge_ids,
+                    ),
+                    "source": source["id"],
+                    "target": target["id"],
+                    "label": "next",
+                }
+            )
+    return validate_workflow({"nodes": nodes, "edges": edges})
 
 
 class AgentBody(BaseModel):

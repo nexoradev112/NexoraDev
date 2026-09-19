@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -20,13 +21,21 @@ from .licensing import (
     require_feature,
 )
 from .models import ProviderConnection, UsageEvent, Workspace
-from .provider_vault import RuntimeCredential, enforce_platform_model, resolve_groq_model, resolve_runtime_credential
+from .provider_vault import (
+    RuntimeCredential,
+    enforce_platform_model,
+    resolve_groq_model,
+    resolve_runtime_credential,
+)
 
 FIXED_LLM_ENDPOINTS = {
     "openai": "https://api.openai.com/v1/chat/completions",
     "groq": "https://api.groq.com/openai/v1/chat/completions",
     "anthropic": "https://api.anthropic.com/v1/messages",
 }
+DEFAULT_MAX_TOKENS = 1_200
+MAX_COMPLETION_TOKENS = 8_192
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -68,17 +77,80 @@ def expand_llm_provider_order(
     return ordered
 
 
+def _openai_request_body(
+    credential: RuntimeCredential,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int,
+    json_object: bool,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"model": model, "messages": messages, "temperature": 0.2}
+    if credential.provider == "groq":
+        body["max_completion_tokens"] = max_tokens
+        if model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = "low"
+            if json_object:
+                body["include_reasoning"] = False
+        elif model.startswith("qwen/"):
+            body["reasoning_effort"] = "none"
+            if json_object:
+                body["reasoning_format"] = "hidden"
+    else:
+        body["max_tokens"] = max_tokens
+    if json_object:
+        body["response_format"] = {"type": "json_object"}
+    return body
+
+
+def _openai_choice_text(data: Mapping[str, Any]) -> str:
+    message = data["choices"][0]["message"]
+    content = message.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        content = "".join(parts)
+    if not isinstance(content, str) or not content.strip():
+        raise KeyError("empty content")
+    return content
+
+
 def _openai_compatible(
     credential: RuntimeCredential,
     model: str,
     messages: list[dict[str, str]],
+    *,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    json_object: bool = False,
 ) -> CompletionResult:
+    timeout = 60 if max_tokens > DEFAULT_MAX_TOKENS else 30
+    payload = _openai_request_body(
+        credential,
+        model,
+        messages,
+        max_tokens=max_tokens,
+        json_object=json_object,
+    )
     response = httpx.post(
         FIXED_LLM_ENDPOINTS[credential.provider],
         headers={"Authorization": f"Bearer {credential.secret}", "Content-Type": "application/json"},
-        json={"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 1200},
-        timeout=30,
+        json=payload,
+        timeout=timeout,
     )
+    if json_object and response.status_code == 400:
+        payload.pop("response_format", None)
+        payload.pop("include_reasoning", None)
+        payload.pop("reasoning_format", None)
+        response = httpx.post(
+            FIXED_LLM_ENDPOINTS[credential.provider],
+            headers={"Authorization": f"Bearer {credential.secret}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
     if response.status_code >= 400:
         raise ProviderResponseError(
             f"{credential.provider} request failed",
@@ -86,18 +158,13 @@ def _openai_compatible(
         )
     try:
         data = response.json()
-        text = data["choices"][0]["message"]["content"]
+        text = _openai_choice_text(data)
         usage = data.get("usage", {})
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise ProviderResponseError(
             f"{credential.provider} returned an invalid response",
             cost_uncertain=True,
         ) from exc
-    if not isinstance(text, str):
-        raise ProviderResponseError(
-            f"{credential.provider} returned an invalid response",
-            cost_uncertain=True,
-        )
     return CompletionResult(
         text=text,
         provider=credential.provider,
@@ -111,7 +178,11 @@ def _anthropic(
     credential: RuntimeCredential,
     model: str,
     messages: list[dict[str, str]],
+    *,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    json_object: bool = False,
 ) -> CompletionResult:
+    del json_object
     system = "\n".join(message["content"] for message in messages if message["role"] == "system")
     conversation = [message for message in messages if message["role"] != "system"]
     response = httpx.post(
@@ -121,8 +192,8 @@ def _anthropic(
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         },
-        json={"model": model, "system": system, "messages": conversation, "max_tokens": 1200},
-        timeout=30,
+        json={"model": model, "system": system, "messages": conversation, "max_tokens": max_tokens},
+        timeout=60 if max_tokens > DEFAULT_MAX_TOKENS else 30,
     )
     if response.status_code >= 400:
         raise ProviderResponseError("anthropic request failed", cost_uncertain=False)
@@ -153,11 +224,15 @@ def create_chat_completion(
     *,
     feature: str,
     allowed_models: Mapping[str, Collection[str]] | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    json_object: bool = False,
 ) -> CompletionResult:
     # Reserve against an upper-bound estimate before using a platform-funded
     # provider. The final counter uses provider-reported tokens when available.
     # UTF-8 byte length is a conservative token upper bound across the supported
     # Arabic, Devanagari, and Latin scripts. It avoids under-reserving paid usage.
+    if isinstance(max_tokens, bool) or not 1 <= max_tokens <= MAX_COMPLETION_TOKENS:
+        raise HTTPException(status_code=422, detail="LLM output token limit is invalid")
     estimated_input = max(1, sum(len(item["content"].encode("utf-8")) for item in messages))
     last_configuration_error: HTTPException | None = None
     attempted = False
@@ -194,7 +269,7 @@ def create_chat_completion(
         if allowed_models is not None and provider_model not in allowed_models.get(provider, ()):
             model_was_rejected = True
             continue
-        reserved = estimated_input + 1200 if credential.source == "platform" else 0
+        reserved = estimated_input + max_tokens if credential.source == "platform" else 0
         if reserved:
             # Reserve and commit before the paid network call. This keeps the
             # database lock short and ensures later validation failures cannot
@@ -206,9 +281,21 @@ def create_chat_completion(
         attempted = True
         try:
             result = (
-                _anthropic(credential, provider_model, messages)
+                _anthropic(
+                    credential,
+                    provider_model,
+                    messages,
+                    max_tokens=max_tokens,
+                    json_object=json_object,
+                )
                 if provider == "anthropic"
-                else _openai_compatible(credential, provider_model, messages)
+                else _openai_compatible(
+                    credential,
+                    provider_model,
+                    messages,
+                    max_tokens=max_tokens,
+                    json_object=json_object,
+                )
             )
         except (httpx.TimeoutException, httpx.NetworkError):
             if reserved:
@@ -278,11 +365,14 @@ def create_chat_completion(
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    start, end = text.find("{"), text.rfind("}")
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = _JSON_FENCE_RE.sub("", cleaned).strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end <= start:
         raise HTTPException(status_code=502, detail="Model did not return a JSON object")
     try:
-        value = json.loads(text[start : end + 1])
+        value = json.loads(cleaned[start : end + 1])
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=502, detail="Model returned invalid JSON") from exc
     if not isinstance(value, dict):

@@ -439,5 +439,37 @@ class WorkflowSemanticTests(unittest.TestCase):
         self.assertTrue(inspect.isasyncgenfunction(RuntimeAgent.tts_node))
 
 
+class Utf8StdioTests(unittest.TestCase):
+    def test_reconfigures_stdio_to_utf8_replace(self) -> None:
+        stream = mock.Mock()
+        agent_module._configure_utf8_stdio(streams=(stream,))
+        stream.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+
+    def test_ignores_streams_that_cannot_reconfigure(self) -> None:
+        agent_module._configure_utf8_stdio(streams=(object(),))
+
+    def test_child_python_processes_inherit_utf8_io_env(self) -> None:
+        self.assertEqual(os.environ.get("PYTHONUTF8"), "1")
+        self.assertEqual(os.environ.get("PYTHONIOENCODING"), "utf-8")
+
+    def test_logging_fullwidth_question_mark_does_not_raise_on_utf8_stream(self) -> None:
+        import io
+        import logging
+
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="utf-8", errors="replace")
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger("nexora.utf8-stdio-test")
+        logger.handlers = [handler]
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        logger.debug(
+            "Received message type partial_transcript",
+            extra={"lk.pii.data": {"text": "Uh...I'm the staff\uff1f"}},
+        )
+        stream.flush()
+        self.assertIn("partial_transcript", buffer.getvalue().decode("utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,35 @@
 """Multi-tenant realtime worker with direct providers and mandatory Python rails."""
+import os
+import sys
+from collections.abc import Sequence
+
+
+def _configure_utf8_stdio(streams: Sequence[object] | None = None) -> None:
+    """Use UTF-8 stdio so STT debug logs cannot crash Windows cp1252 consoles.
+
+    ElevenLabs partial transcripts can include characters such as U+FF1F (？).
+    On Windows, redirected stdout/stderr default to cp1252, and logging.emit
+    then raises UnicodeEncodeError inside StreamHandler.
+    """
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError, AttributeError):
+            continue
+
+
+_configure_utf8_stdio()
+
 import asyncio
 import hashlib
 import hmac
 import inspect
 import json
-import os
 import re
 import secrets
 import tempfile

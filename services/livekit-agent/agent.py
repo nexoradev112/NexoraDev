@@ -72,6 +72,33 @@ from rails import (
 
 load_dotenv(".env.local", override=False)
 
+# Spoken once, then the automated participant leaves. Test rooms stay open so a
+# staff participant can join; billable call rooms still close.
+HANDOFF_NOTICE = "Please wait a moment while I transfer you."
+HANDOFF_ROOM_METADATA = '{"handoff":"waiting_for_staff"}'
+HANDOFF_PLAYOUT_GRACE_SECONDS = 4.0
+_SPOKEN_TRANSFER = re.compile(
+    r"\b("
+    r"let me connect you"
+    r"|let me transfer you"
+    r"|i(?:'ll| will) (?:transfer|connect) you"
+    r"|i(?:'m| am) (?:transferring|connecting) you"
+    r"|please wait(?: a moment)? while i transfer you"
+    r"|connect you (?:with|to)"
+    r"|transfer you to"
+    r"|transferring you"
+    r"|putting you through"
+    r"|hand you (?:over|off)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_spoken_transfer(text: str) -> bool:
+    """True when the caller-facing line is itself a transfer or connect offer."""
+
+    return _SPOKEN_TRANSFER.search(text) is not None
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Do not forward the worker bearer token through an HTTP redirect."""
@@ -537,10 +564,12 @@ class RuntimeAgent(Agent):
         """Sentence-gate model text before TTS while retaining bounded streaming."""
 
         try:
-            checked = safe_tts_segments(
-                text,
-                verified_facts=self._verified_facts,
-                on_handoff=self._mark_handoff,
+            checked = self._handoff_notice_audio(
+                safe_tts_segments(
+                    text,
+                    verified_facts=self._verified_facts,
+                    on_handoff=self._mark_handoff,
+                )
             )
             frames = Agent.default.tts_node(self, checked, model_settings)
             if inspect.isawaitable(frames):
@@ -554,6 +583,43 @@ class RuntimeAgent(Agent):
             # required a handoff. Teardown is mandatory on both success and error.
             await self._terminate_mandatory_handoff()
 
+    async def _handoff_notice_audio(self, checked):
+        """Leave after a spoken transfer, or after the fixed handoff line."""
+
+        consumed = False
+        try:
+            async for chunk in checked:
+                if self._session_state.get("handoff_announced") is True:
+                    yield chunk
+                    continue
+                if is_spoken_transfer(chunk):
+                    self._mark_handoff("spoken_transfer")
+                    self._session_state["handoff_announced"] = True
+                    yield chunk
+                    return
+                if self._session_state.get("handoff_requested") is True:
+                    self._session_state["handoff_announced"] = True
+                    yield HANDOFF_NOTICE
+                    return
+                yield chunk
+            consumed = True
+        finally:
+            if not consumed:
+                aclose = getattr(checked, "aclose", None)
+                if callable(aclose):
+                    try:
+                        await aclose()
+                    except RuntimeError:
+                        pass
+
+    async def _speak_handoff_notice(self, session: AgentSession) -> None:
+        if self._session_state.get("handoff_announced") is True:
+            return
+        self._session_state["handoff_announced"] = True
+        handle = session.say(HANDOFF_NOTICE, allow_interruptions=False, add_to_chat_ctx=False)
+        await asyncio.wait_for(handle.wait_for_playout(), timeout=15)
+        self._session_state["handoff_played"] = True
+
     @function_tool
     async def request_human_handoff(self, ctx: RunContext, reason: str = "policy_or_caller_request") -> str:
         """Request review or transfer by a human operator.
@@ -564,10 +630,15 @@ class RuntimeAgent(Agent):
         checked_reason = guard_tool_text(self._policy, "request_human_handoff", reason)
         safe_reason = re.sub(r"[^a-zA-Z0-9_.:-]", "_", checked_reason)[:80] or "requested"
         self._mark_handoff(safe_reason)
+        try:
+            await self._speak_handoff_notice(ctx.session)
+        except Exception:  # noqa: BLE001 -- teardown still has to leave the automated leg
+            pass
+        await self._terminate_mandatory_handoff()
         return guard_tool_text(
             self._policy,
             "request_human_handoff",
-            "Human handoff requested. Do not claim the transfer completed until the control plane confirms it.",
+            "Human handoff requested. The automated participant is leaving the room.",
             is_result=True,
         )
 
@@ -601,6 +672,61 @@ class RuntimeAgent(Agent):
             "The approved workflow recording was played.",
             is_result=True,
         )
+
+
+async def update_room_metadata(ctx: agents.JobContext, metadata: str) -> None:
+    """Publish handoff state on the LiveKit room before the agent participant leaves."""
+
+    from livekit import api as livekit_api
+
+    await ctx.api.room.update_room_metadata(
+        livekit_api.UpdateRoomMetadataRequest(room=ctx.room.name, metadata=metadata)
+    )
+
+
+async def delete_room_agent_dispatches(ctx: agents.JobContext) -> None:
+    """Drop the room's agent dispatch so the worker is not sent back in."""
+
+    dispatches = await ctx.api.agent_dispatch.list_dispatch(ctx.room.name)
+    for item in dispatches:
+        dispatch_id = str(getattr(item, "id", "") or "")
+        if dispatch_id:
+            await ctx.api.agent_dispatch.delete_dispatch(dispatch_id, ctx.room.name)
+
+
+async def finish_human_handoff(
+    room_name: str,
+    *,
+    delete_room: Callable[[], Awaitable[None]],
+    update_metadata: Callable[[str], Awaitable[None]],
+    shutdown_session: Callable[[], None],
+    shutdown_job: Callable[[str], None],
+    release_dispatch: Callable[[], Awaitable[None]] | None = None,
+) -> None:
+    """Leave the automated leg. Test rooms stay open for a staff participant."""
+
+    try:
+        if room_name.startswith("test-"):
+            try:
+                await asyncio.wait_for(update_metadata(HANDOFF_ROOM_METADATA), timeout=5)
+            except Exception:  # noqa: BLE001 -- still disconnect the agent if metadata fails
+                pass
+            if release_dispatch is not None:
+                try:
+                    await asyncio.wait_for(release_dispatch(), timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            try:
+                await asyncio.sleep(0.75)
+                await asyncio.wait_for(delete_room(), timeout=5)
+            except Exception:  # noqa: BLE001,S110
+                pass
+    finally:
+        try:
+            shutdown_session()
+        finally:
+            shutdown_job("human handoff required")
 
 
 server = AgentServer()
@@ -821,19 +947,24 @@ async def agent_session(ctx: agents.JobContext):
             session_state["llm_tokens"] = llm_tokens
 
         async def end_for_handoff() -> None:
-            # No tenant-controlled destination is dialed automatically. A verified
-            # SIP transfer registry can be added later; v1 fails closed by ending
-            # the automated leg after the fixed handoff notice.
-            try:
-                await asyncio.sleep(0.75)
-                await asyncio.wait_for(ctx.delete_room(), timeout=5)
-            except Exception:  # noqa: BLE001,S110
-                pass
-            finally:
-                try:
-                    session.shutdown(drain=False)
-                finally:
-                    ctx.shutdown("human handoff required")
+            # Test rooms stay up so human_simulator.py can join as staff.
+            # Call rooms still close: SIP transfer is not wired in this worker.
+            # The transfer line is spoken before this runs. Do not call session.say
+            # here; this function is reached from inside the TTS pipeline.
+            if session_state.get("handoff_played") is not True:
+                await asyncio.sleep(
+                    HANDOFF_PLAYOUT_GRACE_SECONDS
+                    if session_state.get("handoff_announced") is True
+                    else 0.75
+                )
+            await finish_human_handoff(
+                ctx.room.name,
+                delete_room=ctx.delete_room,
+                update_metadata=lambda metadata: update_room_metadata(ctx, metadata),
+                shutdown_session=lambda: session.shutdown(drain=False),
+                shutdown_job=lambda reason: ctx.shutdown(reason),
+                release_dispatch=lambda: delete_room_agent_dispatches(ctx),
+            )
 
         ctx.add_shutdown_callback(finalize_call)
         verified_facts = (

@@ -14,8 +14,12 @@ from livekit.agents import Agent
 
 import agent as agent_module
 from agent import (
+    HANDOFF_NOTICE,
+    HANDOFF_ROOM_METADATA,
+    is_spoken_transfer,
     RuntimeAgent,
     agent_session,
+    finish_human_handoff,
     flush_completion_spool,
     platform_llm_token_budget,
     post_completion,
@@ -52,10 +56,38 @@ class TtsRailTests(unittest.IsolatedAsyncioTestCase):
             frames = [frame async for frame in runtime.tts_node(stream("You definitely ", "have diabetes."), None)]
 
         self.assertEqual(frames, [b"audio-frame"])
-        self.assertEqual(len(received), 1)
+        self.assertEqual(received, [HANDOFF_NOTICE])
         self.assertNotIn("diabetes", received[0].lower())
-        self.assertIn("human", received[0].lower())
         self.assertTrue(state.get("handoff_requested"))
+        self.assertTrue(state.get("handoff_announced"))
+
+    async def test_spoken_connect_line_is_played_and_ends_the_agent(self) -> None:
+        received: list[str] = []
+        state: dict[str, object] = {"rail_events": []}
+        runtime = RuntimeAgent("safe", "test-w1-a1-room", set(), RailPolicy(), state)
+        line = "Let me connect you with a specialist."
+
+        def fake_default_tts(_self, checked_text, _settings):
+            async def frames():
+                async for value in checked_text:
+                    received.append(value)
+                    yield b"audio-frame"
+
+            return frames()
+
+        with mock.patch.object(Agent.default, "tts_node", new=fake_default_tts):
+            frames = [frame async for frame in runtime.tts_node(stream(line), None)]
+
+        self.assertEqual(frames, [b"audio-frame"])
+        self.assertEqual(received, [line])
+        self.assertTrue(state.get("handoff_requested"))
+        self.assertTrue(state.get("handoff_announced"))
+        self.assertIn("spoken_transfer", state.get("rail_events", []))
+
+    def test_ordinary_reply_is_not_a_spoken_transfer(self) -> None:
+        self.assertFalse(is_spoken_transfer("I can help you with that billing question."))
+        self.assertTrue(is_spoken_transfer("Let me connect you with our support team."))
+        self.assertTrue(is_spoken_transfer(HANDOFF_NOTICE))
 
     async def test_streaming_waits_for_complete_pii_before_yielding(self) -> None:
         iterator = safe_tts_segments(stream("Email user@exa", "mple.com. ", "Thank you."))
@@ -469,6 +501,52 @@ class Utf8StdioTests(unittest.TestCase):
         )
         stream.flush()
         self.assertIn("partial_transcript", buffer.getvalue().decode("utf-8"))
+
+
+class HumanHandoffRoomTests(unittest.IsolatedAsyncioTestCase):
+    async def test_test_room_stays_open_and_marks_staff_wait(self) -> None:
+        deleted: list[bool] = []
+        metadata: list[str] = []
+        shutdowns: list[str] = []
+
+        async def delete_room() -> None:
+            deleted.append(True)
+
+        async def update_metadata(value: str) -> None:
+            metadata.append(value)
+
+        await finish_human_handoff(
+            "test-w1-a1-room",
+            delete_room=delete_room,
+            update_metadata=update_metadata,
+            shutdown_session=lambda: shutdowns.append("session"),
+            shutdown_job=shutdowns.append,
+        )
+
+        self.assertEqual(deleted, [])
+        self.assertEqual(metadata, [HANDOFF_ROOM_METADATA])
+        self.assertEqual(shutdowns, ["session", "human handoff required"])
+
+    async def test_call_room_is_still_deleted(self) -> None:
+        deleted: list[bool] = []
+        metadata: list[str] = []
+
+        async def delete_room() -> None:
+            deleted.append(True)
+
+        async def update_metadata(value: str) -> None:
+            metadata.append(value)
+
+        await finish_human_handoff(
+            "call-w1-a1-room",
+            delete_room=delete_room,
+            update_metadata=update_metadata,
+            shutdown_session=lambda: None,
+            shutdown_job=lambda _reason: None,
+        )
+
+        self.assertEqual(deleted, [True])
+        self.assertEqual(metadata, [])
 
 
 if __name__ == "__main__":

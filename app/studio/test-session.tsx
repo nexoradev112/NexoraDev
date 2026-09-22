@@ -3,7 +3,14 @@
 import type { Room } from "livekit-client";
 import { useEffect, useRef, useState } from "react";
 
-type ChatLine = { role: "system" | "agent" | "user"; text: string };
+type ChatLine = { role: "system" | "agent" | "user" | "staff"; text: string };
+
+function participantLabel(identity: string, name: string, event: "joined" | "left") {
+  if (identity === "staff" || name === "Staff") {
+    return event === "joined" ? "Staff joined." : "Staff left.";
+  }
+  return event === "joined" ? "Voice agent joined the test room." : "Voice agent left the test room.";
+}
 
 export default function TestSession({ agentId, workspaceId, agentName, brand, onClose }: { agentId: number; workspaceId: number; agentName: string; brand: string; onClose: () => void }) {
   const roomRef = useRef<Room | null>(null);
@@ -31,7 +38,13 @@ export default function TestSession({ agentId, workspaceId, agentName, brand, on
     });
     room.on(RoomEvent.TrackUnsubscribed, track => track.detach());
     room.on(RoomEvent.Disconnected, () => { setStatus("Disconnected"); setMicOn(false); roomRef.current = null; });
-    room.on(RoomEvent.ParticipantConnected, () => setMessages(current => [...current, { role: "system", text: "Voice agent joined the test room." }]));
+    room.on(RoomEvent.ParticipantConnected, (participant) => setMessages(current => [...current, { role: "system", text: participantLabel(participant.identity, participant.name || "", "joined") }]));
+    room.on(RoomEvent.ParticipantDisconnected, (participant) => setMessages(current => [...current, { role: "system", text: participantLabel(participant.identity, participant.name || "", "left") }]));
+    room.on(RoomEvent.DataReceived, (payload, participant) => {
+      if (!participant || (participant.identity !== "staff" && participant.name !== "Staff")) return;
+      const text = new TextDecoder().decode(payload).trim();
+      if (text) setMessages(current => [...current, { role: "staff", text }]);
+    });
     try {
       const response = await fetch("/api/livekit/token", { method: "POST", headers: { "content-type": "application/json", "x-workspace-id": String(workspaceId) }, body: JSON.stringify({ agentId, sessionId: crypto.randomUUID() }) });
       const data = await response.json() as { server_url?: string; participant_token?: string; error?: string; voice_notice?: string; voiceNotice?: string };
@@ -81,7 +94,7 @@ export default function TestSession({ agentId, workspaceId, agentName, brand, on
     <div><b>Test {agentName}</b><button type="button" onClick={onClose} aria-label="Close test">×</button></div>
     <p className="test-status"><span className={micOn ? "voice-live" : ""}>●</span> {status}</p>
     {voiceNotice ? <p className="settings-notice" role="status">{voiceNotice}</p> : null}
-    <div className="test-feed">{messages.map((message, index) => <p key={`${message.role}-${index}`} className={message.role === "user" ? "user-msg" : message.role === "agent" ? "agent-msg" : "system-msg"}>{message.role === "agent" ? <small>{brand} agent</small> : null}{message.text}</p>)}</div>
+    <div className="test-feed">{messages.map((message, index) => <p key={`${message.role}-${index}`} className={message.role === "user" ? "user-msg" : message.role === "agent" ? "agent-msg" : "system-msg"}>{message.role === "agent" ? <small>{brand} agent</small> : message.role === "staff" ? <small>Staff</small> : null}{message.text}</p>)}</div>
     <div ref={audioRef} hidden/>
     <div className="voice-controls"><button type="button" onClick={() => void (roomRef.current ? toggleMic() : startVoice())} disabled={connecting}>{roomRef.current ? (micOn ? "Mute microphone" : "Unmute microphone") : "Start voice test"}</button></div>
     <div className="test-compose"><span aria-hidden="true">⌨</span><input value={input} placeholder="Type a message…" onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void sendText(); }}/><button type="button" onClick={() => void sendText()} aria-label="Send message">↑</button></div>

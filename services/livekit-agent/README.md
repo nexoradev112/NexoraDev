@@ -133,11 +133,30 @@ ports, microphone permission, a voice-compatible signed license, and valid
 STT/LLM/TTS credentials. Unit tests and container health checks do not prove
 that path.
 
+## Human handoff simulator
+
+On a human handoff the worker speaks "Please wait a moment while I transfer you."
+and then leaves the room. The same leave happens when the agent itself says it
+is connecting or transferring the caller, for example "Let me connect you with
+a specialist." That sentence is played as spoken. Browser test rooms stay open.
+Billable `call-*` rooms still close, because SIP transfer is not wired yet.
+
+From `services/livekit-agent`, start this before or during the voice test:
+
+```bash
+python human_simulator.py
+```
+
+It uses the same `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` as
+the worker. After the voice agent disconnects, the test drawer shows
+"Staff joined." Lines typed in that terminal are spoken into the room with the
+Windows speech API. `/quit` leaves and waits for the next test-room handoff.
+
 ## v1 boundaries
 
 - Post-call Webhook and QA nodes are stored by the Studio but are not executed
   by this worker in v1.
-- A Handoff node records/requests escalation; confirmed SIP transfer is phase
-  two.
+- A Handoff node records/requests escalation. Test rooms can be joined by
+  `human_simulator.py`. Confirmed SIP transfer is phase two.
 - Carrier-specific outbound dialing and campaigns are phase two.
 - This worker is not a high-availability or per-tenant LiveKit worker pool.

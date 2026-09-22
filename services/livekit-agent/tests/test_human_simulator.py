@@ -1,10 +1,14 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from human_simulator import (
     mono_s16,
     pcm_chunks,
     room_is_waiting_for_staff,
     should_join_as_staff,
+    synthesize_wav,
 )
 
 
@@ -64,6 +68,32 @@ class HumanSimulatorTests(unittest.TestCase):
         stereo = b"\x01\x00\x02\x00" * 4
         mono = mono_s16(stereo, 2, 2)
         self.assertEqual(mono, b"\x01\x00" * 4)
+
+    def test_linux_tts_uses_espeak(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "line.wav"
+
+            def fake_run(args, **_kwargs):
+                destination.write_bytes(b"RIFF" + b"\x00" * 12)
+                return None
+
+            with (
+                patch("human_simulator.sys.platform", "linux"),
+                patch("human_simulator._linux_tts_binary", return_value="/usr/bin/espeak-ng"),
+                patch("human_simulator.subprocess.run", side_effect=fake_run) as run,
+            ):
+                synthesize_wav("hello staff", destination)
+            self.assertEqual(run.call_args.args[0][:3], ["/usr/bin/espeak-ng", "-w", str(destination)])
+            self.assertEqual(run.call_args.args[0][-1], "hello staff")
+            self.assertTrue(destination.is_file())
+
+    def test_unsupported_platform_raises(self) -> None:
+        with (
+            patch("human_simulator.sys.platform", "darwin"),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            with self.assertRaises(RuntimeError):
+                synthesize_wav("hello", Path(directory) / "line.wav")
 
 
 if __name__ == "__main__":

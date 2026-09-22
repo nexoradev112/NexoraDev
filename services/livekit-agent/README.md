@@ -149,8 +149,9 @@ python human_simulator.py
 
 It uses the same `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` as
 the worker. After the voice agent disconnects, the test drawer shows
-"Staff joined." Lines typed in that terminal are spoken into the room with the
-Windows speech API. `/quit` leaves and waits for the next test-room handoff.
+"Staff joined." Lines typed in that terminal are spoken into the room: Windows
+uses the speech API (SAPI); Linux uses `espeak-ng` or `espeak` (install one if
+missing). `/quit` leaves and waits for the next test-room handoff.
 
 ## v1 boundaries
 

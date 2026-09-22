@@ -16,6 +16,7 @@ import array
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -114,7 +115,15 @@ def pcm_chunks(pcm: bytes, sample_rate: int, frame_ms: int = 20) -> list[tuple[b
     return frames
 
 
-def synthesize_wav(text: str, destination: Path) -> None:
+def _linux_tts_binary() -> str | None:
+    for name in ("espeak-ng", "espeak"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _synthesize_wav_windows(text: str, destination: Path) -> None:
     """Write spoken audio with the Windows speech API."""
 
     script_path = destination.with_suffix(".ps1")
@@ -135,9 +144,12 @@ def synthesize_wav(text: str, destination: Path) -> None:
     env = os.environ.copy()
     env["STAFF_WAV"] = str(destination)
     env["STAFF_TXT"] = str(text_path)
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    if not powershell:
+        raise RuntimeError("powershell is required for staff TTS on Windows")
     try:
         subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-File", str(script_path)],
+            [powershell, "-NoProfile", "-NonInteractive", "-File", str(script_path)],
             check=True,
             env=env,
             timeout=30,
@@ -146,6 +158,40 @@ def synthesize_wav(text: str, destination: Path) -> None:
     finally:
         text_path.unlink(missing_ok=True)
         script_path.unlink(missing_ok=True)
+
+
+def _synthesize_wav_linux(text: str, destination: Path) -> None:
+    """Write spoken audio with espeak-ng or espeak."""
+
+    binary = _linux_tts_binary()
+    if not binary:
+        raise RuntimeError(
+            "Staff TTS on Linux needs espeak-ng or espeak. "
+            "Install one of them, for example: sudo apt-get install -y espeak-ng"
+        )
+    subprocess.run(
+        [binary, "-w", str(destination), "--", text],
+        check=True,
+        timeout=30,
+        capture_output=True,
+    )
+    if not destination.is_file() or destination.stat().st_size == 0:
+        raise RuntimeError(f"{binary} did not write a WAV file at {destination}")
+
+
+def synthesize_wav(text: str, destination: Path) -> None:
+    """Write spoken audio for staff lines on Windows or Linux."""
+
+    if sys.platform.startswith("win"):
+        _synthesize_wav_windows(text, destination)
+        return
+    if sys.platform.startswith("linux"):
+        _synthesize_wav_linux(text, destination)
+        return
+    raise RuntimeError(
+        f"Staff TTS is not implemented on this platform ({sys.platform}). "
+        "Use Windows (SAPI) or Linux (espeak-ng/espeak)."
+    )
 
 
 class StaffSpeaker:

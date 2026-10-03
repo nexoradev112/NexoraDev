@@ -471,6 +471,21 @@ class WorkflowSemanticTests(unittest.TestCase):
         self.assertTrue(inspect.isasyncgenfunction(RuntimeAgent.tts_node))
 
 
+class WindowsConsoleInterruptTests(unittest.TestCase):
+    def test_console_wait_returns_to_python_so_ctrl_c_can_land(self) -> None:
+        event = mock.Mock()
+        event.wait.side_effect = [False, False, True]
+        agent_module._interruptible_console_wait(mock.Mock(_io_acquired_event=event))
+        event.wait.assert_has_calls([mock.call(0.2), mock.call(0.2), mock.call(0.2)])
+
+    def test_second_ctrl_c_kills_and_other_events_are_ignored(self) -> None:
+        armed: dict[str, bool] = {}
+        self.assertEqual(agent_module.console_ctrl_action(2, armed=armed), None)
+        self.assertEqual(agent_module.console_ctrl_action(0, armed=armed), "schedule")
+        self.assertEqual(agent_module.console_ctrl_action(0, armed=armed), "kill")
+        self.assertEqual(agent_module.console_ctrl_action(1, armed=armed), "kill")
+
+
 class Utf8StdioTests(unittest.TestCase):
     def test_reconfigures_stdio_to_utf8_replace(self) -> None:
         stream = mock.Mock()

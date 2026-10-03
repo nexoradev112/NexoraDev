@@ -1243,5 +1243,86 @@ def post_completion(payload: dict[str, object]) -> None:
         raise RuntimeError("Call completion could not be reported or spooled") from error
 
 
+_CONSOLE_CTRL_HANDLER = None
+
+
+def _interruptible_console_wait(self: object) -> None:
+    """Poll console startup so Ctrl+C can run on Windows.
+
+    LiveKit waits on ``threading.Event.wait()`` with no timeout until voice
+    I/O is acquired. On Windows that wait blocks inside a Win32 call, and
+    Python only runs the SIGINT handler between bytecode instructions, so
+    Ctrl+C does nothing until the event is set. A short timeout returns to
+    Python often enough for the handler to raise.
+    """
+    event = getattr(self, "_io_acquired_event")
+    while not event.wait(0.2):
+        continue
+
+
+def console_ctrl_action(ctrl_type: int, *, armed: dict[str, bool]) -> str | None:
+    """Decide how a Windows console control event should stop the worker.
+
+    ``schedule`` lets LiveKit's own handler shut down, then a backup kill
+    runs if the process is still alive. ``kill`` is the second Ctrl+C.
+    """
+    if ctrl_type not in (0, 1):
+        return None
+    if armed.get("scheduled"):
+        return "kill"
+    armed["scheduled"] = True
+    return "schedule"
+
+
+def _kill_console_process_tree() -> None:
+    import subprocess
+
+    subprocess.run(
+        ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    os._exit(130)
+
+
+def _install_windows_console_interrupt() -> None:
+    if sys.platform != "win32":
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        from livekit.agents.cli._legacy import AgentsConsole
+    except ImportError:
+        AgentsConsole = None  # type: ignore[misc, assignment]
+    if AgentsConsole is not None:
+        AgentsConsole.wait_for_io_acquisition = _interruptible_console_wait  # type: ignore[method-assign]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    armed: dict[str, bool] = {}
+
+    def _handler(ctrl_type: int) -> bool:
+        action = console_ctrl_action(ctrl_type, armed=armed)
+        if action == "kill":
+            _kill_console_process_tree()
+            return True
+        if action == "schedule":
+            def _backup() -> None:
+                time.sleep(3)
+                _kill_console_process_tree()
+
+            threading.Thread(target=_backup, name="console-ctrl-c-exit", daemon=True).start()
+            return False
+        return False
+
+    global _CONSOLE_CTRL_HANDLER
+    _CONSOLE_CTRL_HANDLER = handler_type(_handler)
+    kernel32.SetConsoleCtrlHandler(_CONSOLE_CTRL_HANDLER, True)
+
+
 if __name__ == "__main__":
+    _install_windows_console_interrupt()
     agents.cli.run_app(server)

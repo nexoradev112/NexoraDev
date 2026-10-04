@@ -1,0 +1,18 @@
+[Unit]
+Description=Nexora web
+After=network-online.target
+
+[Service]
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=/opt/nexora/.next/standalone
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=5008
+ExecStart=__NODE__ server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,53 @@
+name: Deploy
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or tag to deploy
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Update the server
+        env:
+          SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+          HOST: ${{ secrets.DROPLET_HOST }}
+          USER: ${{ secrets.DROPLET_USER }}
+          REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          PUBLIC_ORIGIN: ${{ secrets.APP_DOMAIN }}
+        run: |
+          if [ -z "$HOST" ] || [ -z "$USER" ] || [ -z "$SSH_KEY" ]; then
+            echo "Add DROPLET_HOST, DROPLET_USER, and DROPLET_SSH_KEY to the repository secrets."
+            exit 1
+          fi
+          case "$REF" in
+            *[!A-Za-z0-9._/-]*|"")
+              echo "Ref may contain only letters, numbers, and . _ / -"
+              exit 1
+              ;;
+          esac
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "$USER@$HOST" \
+            "set -euo pipefail; sudo mkdir -p /opt/nexora; sudo chown ${USER}:${USER} /opt/nexora; cd /opt/nexora; if [ ! -d .git ]; then git clone git@github.com:hassanete112/AgenticAI_SaaS.git .; fi; if [ ! -f scripts/deploy-native.sh ]; then git fetch --tags origin; git fetch origin '$REF'; git checkout --detach FETCH_HEAD; fi; NEXORA_PUBLIC_ORIGIN='$PUBLIC_ORIGIN' bash scripts/deploy-native.sh '$REF'"

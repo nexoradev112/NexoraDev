@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit or tag to test
+        required: false
+        type: string
+        default: ""
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:unit
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  api:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Lint and test the API
+        working-directory: backend
+        run: |
+          uv sync --extra dev --frozen
+          uv run ruff check .
+          uv run pytest
+
+  voice:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Test the voice worker
+        working-directory: services/livekit-agent
+        run: |
+          uv sync --frozen
+          uv run python -m unittest discover -s tests -v
+
+  release-archive:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: bash scripts/package-release.sh /tmp/nexora-release.zip

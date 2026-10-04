@@ -1,0 +1,16 @@
+[Unit]
+Description=Nexora voice worker
+After=network-online.target nexora-api.service
+
+[Service]
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=/opt/nexora/services/livekit-agent
+EnvironmentFile=/opt/nexora/services/livekit-agent/.env.local
+ExecStart=/opt/nexora/services/livekit-agent/.venv/bin/python agent.py start
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

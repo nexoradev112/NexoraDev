@@ -28,20 +28,29 @@ from ..licensing import (
     verified_claims,
 )
 from ..livekit_urls import exact_livekit_origin
-from ..models import Agent, AuditLog, CallSession, License, ProviderConnection, StoredFile, UsageEvent, Workspace
-from ..provider_runtime import expand_llm_provider_order
-from ..provider_vault import (
-    RuntimeCredential,
-    SUPPORTED_PROVIDERS,
-    enforce_platform_model,
-    resolve_groq_model,
-    resolve_runtime_credential,
+from ..models import (
+    Agent,
+    AuditLog,
+    CallSession,
+    License,
+    ProviderConnection,
+    StoredFile,
+    UsageEvent,
+    Workspace,
 )
 from ..postcall import (
     post_call_stats,
     prepare_post_call_jobs,
     run_post_call_background,
     snapshot_post_call_plan,
+)
+from ..provider_runtime import expand_llm_provider_order
+from ..provider_vault import (
+    SUPPORTED_PROVIDERS,
+    RuntimeCredential,
+    enforce_platform_model,
+    resolve_groq_model,
+    resolve_runtime_credential,
 )
 from ..security import authenticate_worker, now_utc
 from ..storage import resolve_storage_key
@@ -308,9 +317,10 @@ def _runtime_descriptor(
     }
     configured_model = credential.config.get("model", "")
     agent_model = str(agent_snapshot.get("model") or "")
+    groq_prefixes = ("llama", "mixtral", "gemma", "openai/", "qwen/")
     if kind == "llm" and (
         (credential.provider == "openai" and agent_model.startswith("gpt-"))
-        or (credential.provider == "groq" and agent_model.startswith(("llama", "mixtral", "gemma", "openai/", "qwen/")))
+        or (credential.provider == "groq" and agent_model.startswith(groq_prefixes))
         or (credential.provider == "anthropic" and agent_model.startswith("claude-"))
     ):
         configured_model = agent_model

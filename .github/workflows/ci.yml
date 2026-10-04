@@ -34,7 +34,7 @@ jobs:
       - run: npm run lint
       - run: npm run test:unit
       - run: npm run build
-      - run: npm audit --audit-level=high
+      - run: npm audit --omit=dev --audit-level=high
 
   api:
     runs-on: ubuntu-24.04

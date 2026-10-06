@@ -16,6 +16,7 @@ from ..dependencies import (
     WorkspaceAccess,
     current_principal,
     require_recent_auth,
+    require_superadmin,
     require_workspace,
 )
 from ..licensing import active_license_for_workspace, assert_seat_available, require_feature, token_hash
@@ -34,6 +35,20 @@ def _accesses(db: Session, user_id: int) -> list[tuple[Workspace, Membership]]:
             .order_by(Workspace.name)
         ).all()
     )
+
+
+@router.get("/api/superadmin/workspaces")
+def list_workspaces_for_operator(
+    _principal: Annotated[Principal, Depends(require_superadmin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, object]:
+    rows = db.scalars(select(Workspace).order_by(Workspace.name, Workspace.id)).all()
+    return {
+        "workspaces": [
+            {"id": row.id, "name": row.name, "slug": row.slug, "status": row.status}
+            for row in rows
+        ]
+    }
 
 
 @router.get("/api/workspaces")

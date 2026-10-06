@@ -302,3 +302,14 @@ def test_recording_feature_cannot_be_bypassed_and_symlink_namespace_is_rejected(
     with pytest.raises(Exception) as exc:
         category_directory(get_settings(), "recordings", symlink_workspace)
     assert getattr(exc.value, "status_code", None) == 500
+
+
+def test_superadmin_workspace_directory_lists_names(tenant, superadmin, origin):
+    workspace_id = register(tenant, origin, "picker@example.com", "Picker Workspace")
+    denied = tenant.get("/api/superadmin/workspaces", headers=origin)
+    assert denied.status_code == 403
+    listed = superadmin.get("/api/superadmin/workspaces", headers=origin)
+    assert listed.status_code == 200, listed.text
+    match = next(row for row in listed.json()["workspaces"] if row["id"] == workspace_id)
+    assert match["name"] == "Picker Workspace"
+    assert match["status"] == "pending_license"

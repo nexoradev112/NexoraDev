@@ -1,0 +1,51 @@
+.settings-form .field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-form .field-tip {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #c8c9cc;
+  border-radius: 50%;
+  background: #fff;
+  color: #6f737a;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+
+.settings-form .field-tip span {
+  display: none !important;
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(260px, 70vw);
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #17191d;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.settings-form .field-tip:hover span,
+.settings-form .field-tip:focus span,
+.settings-form .field-tip:focus-visible span {
+  display: block !important;
+}

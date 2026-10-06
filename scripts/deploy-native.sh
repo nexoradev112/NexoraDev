@@ -140,6 +140,7 @@ echo "Database backup: $backup_dir/postgres.dump"
 echo "Previous commit: $previous"
 
 npm ci
+rm -rf .next
 npm run build
 mkdir -p .next/standalone/.next
 rm -rf .next/standalone/public .next/standalone/.next/static

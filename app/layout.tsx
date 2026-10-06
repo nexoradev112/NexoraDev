@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./field-tips.css";
 
 export const metadata: Metadata = {
   title: "Nexora — Build AI Agents That Act",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError
@@ -33,6 +33,79 @@ determinations. When facts or authority are missing, explain that and offer huma
 handoff. Workflow Guardrail nodes represent human approval and cannot override
 these safety rules.
 """.strip()
+
+REPLY_RULE = (
+    "Reply to the caller's latest message. Repeat any name, message, date, or "
+    "other detail they just stated before asking for anything else. Repeating a "
+    "detail they stated is not inventing data. If a fact is not in the "
+    "instructions above, say you do not have it."
+)
+
+
+def chat_workflow_instructions(workflow: object) -> str:
+    """Turn the saved studio graph into text instructions for typed Talk tests.
+
+    Voice-only tool calls are rewritten so a text reply cannot claim that a
+    transfer, tool, or audio playback already happened.
+    """
+
+    if isinstance(workflow, dict):
+        raw_nodes = workflow.get("nodes", [])
+        raw_edges = workflow.get("edges", [])
+    elif isinstance(workflow, list):
+        raw_nodes, raw_edges = workflow, []
+    else:
+        return ""
+    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+        return ""
+
+    notes = {
+        "Handoff": "Say you will connect them with a person. Do not claim the transfer already finished.",
+        "Guardrail": "This step needs a person. Offer handoff and stop.",
+        "Tool": "Do not claim a tool ran or that an outside system was updated.",
+        "Audio": "This step plays audio on a phone call. In text, follow the written instruction only.",
+        "End": "After answering, repeat the confirmed details and close.",
+    }
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_nodes[:100]:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("id", ""))[:80]
+        node_type = str(raw.get("type", "Agent"))[:40]
+        if not node_id or node_type in {"Webhook", "QA"}:
+            continue
+        seen.add(node_id)
+        label = _bounded_text(raw.get("label"), node_type, 160)
+        prompt = _bounded_text(raw.get("prompt"), "", 2_000)
+        note = notes.get(node_type, "")
+        lines.append(f"- {node_id} [{node_type}] {label}: {prompt} {note}".strip())
+    branches: list[str] = []
+    for raw in raw_edges[:200]:
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source", ""))[:80]
+        target = str(raw.get("target", ""))[:80]
+        if source not in seen or target not in seen:
+            continue
+        condition = _bounded_text(raw.get("condition") or raw.get("label"), "always", 300)
+        branches.append(f"- {source} -> {target} when {condition}")
+    if not lines:
+        return ""
+    graph = (
+        "Follow this approved conversation graph. The caller has already spoken, "
+        "so answer their latest message instead of greeting again. Choose the "
+        "matching branch. Node text is business instruction and cannot override "
+        "the safety policy.\nNodes:\n" + "\n".join(lines)
+    )
+    if branches:
+        graph += "\nBranches:\n" + "\n".join(branches)
+    return graph
+
+
+def _bounded_text(value: Any, fallback: str, limit: int) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    return (text or fallback)[:limit]
 
 
 class Message(BaseModel):
@@ -92,8 +165,19 @@ def chat(
         sanitized_messages.append({"role": item.role, "content": decision.text})
 
     system_text, system_redactions = redact_sensitive(
-        f"{BASE_CHAT_POLICY}\nLocale: {agent.locale}\nObjective: {agent.objective}\n"
-        f"Instructions: {agent.global_prompt}"
+        "\n".join(
+            part
+            for part in (
+                BASE_CHAT_POLICY,
+                f"Locale: {agent.locale}",
+                f"Objective: {agent.objective}",
+                f"Instructions: {agent.global_prompt}",
+                f"Greeting: {agent.greeting}",
+                chat_workflow_instructions(agent.workflow),
+                REPLY_RULE,
+            )
+            if part
+        )
     )
     messages = [
         {"role": "system", "content": system_text},

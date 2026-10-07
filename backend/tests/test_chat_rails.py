@@ -128,6 +128,95 @@ def _create_chat_agent(
     return workspace_id, response.json()["agent"]["id"], headers
 
 
+def test_chat_sends_saved_workflow_and_requires_stated_details(
+    tenant: TestClient,
+    superadmin: TestClient,
+    origin: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace_id = register(tenant, origin, "front-desk-chat@example.com", "Front desk")
+    entitlement = issue(superadmin, origin, workspace_id, "byok")
+    activate(tenant, origin, workspace_id, entitlement["licenseKey"])
+    headers = origin | {"x-workspace-id": str(workspace_id)}
+    created = tenant.post(
+        "/api/agents",
+        headers=headers,
+        json={
+            "name": "Front Desk",
+            "objective": "Answer questions and take a message.",
+            "globalPrompt": "Do not invent hours, prices, or names.",
+            "greeting": "Hello, you've reached the front desk.",
+            "locale": "en-US",
+            "channel": "chat",
+            "recordingEnabled": False,
+            "workflow": {
+                "nodes": [
+                    {
+                        "id": "greet",
+                        "type": "Agent",
+                        "label": "Greet the caller",
+                        "prompt": "Ask how you can help.",
+                        "position": {"x": 80, "y": 80},
+                    },
+                    {
+                        "id": "close",
+                        "type": "End",
+                        "label": "Close the call",
+                        "prompt": "Repeat the confirmed details.",
+                        "position": {"x": 380, "y": 80},
+                    },
+                ],
+                "edges": [
+                    {
+                        "id": "e-greet-close",
+                        "source": "greet",
+                        "target": "close",
+                        "label": "answered",
+                        "condition": "The question was answered",
+                    }
+                ],
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    agent_id = created.json()["agent"]["id"]
+    chat_module = importlib.import_module("app.api.chat")
+    captured: dict[str, object] = {}
+
+    def fake_completion(_db, _claims, _settings, _provider_order, model, messages, *, feature):
+        assert feature == "chat"
+        captured["messages"] = messages
+        return CompletionResult(
+            text="I will pass your message to the manager, Priya.",
+            provider="openai",
+            model=model,
+            input_tokens=8,
+            output_tokens=8,
+        )
+
+    monkeypatch.setattr(chat_module, "create_chat_completion", fake_completion)
+    response = tenant.post(
+        "/api/chat",
+        headers=headers,
+        json={
+            "agentId": agent_id,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Please take a message for the manager. My name is Priya.",
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    system = captured["messages"][0]["content"]
+    assert "Greet the caller" in system
+    assert "Close the call" in system
+    assert "The question was answered" in system
+    assert "Repeat any name" in system
+    assert system.index("Do not invent hours, prices, or names.") < system.index("Repeat any name")
+
+
 def test_chat_blocks_before_provider_and_never_echoes_attack(
     tenant: TestClient,
     superadmin: TestClient,
